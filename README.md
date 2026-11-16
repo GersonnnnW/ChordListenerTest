@@ -140,6 +140,7 @@ All settings are environment variables.
 | `CL_MODEL_THREADS` | all cores | CPU threads the pitch model may use per analysis |
 | `CL_CATALOG` | `itunes` | Song lookup provider; `none` disables search by name |
 | `CL_CORS_ORIGINS` | `*` | Browser origins allowed to call the API |
+| `CL_MEDIA_ORIGINS` | Apple's CDN | Origins the website may load artwork and preview audio from; change it when you plug in your own catalogue |
 | `CL_TRUST_PROXY` | `false` | Read the client IP from `X-Forwarded-For` (set when behind a reverse proxy) |
 | `CL_RETENTION_DAYS` | `30` | Days results are kept; `0` keeps them forever |
 | `CL_WAIT_SECONDS` | `120` | How long a request is held open before it turns into a pollable job |

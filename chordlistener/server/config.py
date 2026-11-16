@@ -38,6 +38,8 @@ class Settings:
     # How long results are kept before they are purged (0 = keep forever).
     retention_days: int = field(default_factory=lambda: _int("CL_RETENTION_DAYS", 30))
     wait_seconds: int = field(default_factory=lambda: _int("CL_WAIT_SECONDS", 120))
+    # Where the website may load artwork and preview audio from (the catalogue's CDN).
+    media_origins: str = field(default_factory=lambda: os.environ.get("CL_MEDIA_ORIGINS", "https://*.apple.com https://*.mzstatic.com"))
 
     @property
     def db_path(self) -> str:

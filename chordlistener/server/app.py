@@ -402,7 +402,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         # Scripts only from this server; artwork and preview audio only from the catalogue's CDN.
         "Content-Security-Policy": (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
-            "img-src 'self' data: https://*.mzstatic.com; media-src 'self' blob: https://*.apple.com https://*.mzstatic.com; "
+            f"img-src 'self' data: {settings.media_origins}; media-src 'self' blob: {settings.media_origins}; "
             "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
         ),
     }
