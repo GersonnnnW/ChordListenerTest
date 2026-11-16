@@ -155,14 +155,15 @@ def decode_notes(
         events.append((t0, i, f, float(frames[t0:i, f].mean())))
 
     # Notes with no clear attack (voice, strings, pads): grow outwards from the
-    # strongest leftover activation until it fades.
-    col_max = remaining.max(axis=0)
-    while True:
-        f = int(col_max.argmax())
-        if col_max[f] <= frame_threshold:
-            break
+    # strongest leftover activation until it fades. Visiting leftovers from
+    # strongest to weakest and skipping ones already claimed is the same as
+    # repeatedly searching for the maximum, without rescanning the matrix.
+    left_t, left_f = np.nonzero(remaining > frame_threshold)
+    strongest_first = np.argsort(-remaining[left_t, left_f], kind="stable")
+    for mid, f in zip(left_t[strongest_first].tolist(), left_f[strongest_first].tolist()):
         col = remaining[:, f]
-        mid = int(col.argmax())
+        if col[mid] <= frame_threshold:
+            continue
         col[mid] = 0
         i, k = mid + 1, 0
         while i < last and k < energy_tolerance:
@@ -175,9 +176,7 @@ def decode_notes(
             k = k + 1 if col[i] < frame_threshold else 0
             i -= 1
         begin = i + 1 + k
-        lo_f, hi_f = max(f - 1, 0), min(f + 2, N_PITCHES)
-        remaining[max(i, 0) : hi, lo_f:hi_f] = 0
-        col_max[lo_f:hi_f] = remaining[:, lo_f:hi_f].max(axis=0)
+        remaining[max(i, 0) : hi, max(f - 1, 0) : min(f + 2, N_PITCHES)] = 0
         if end - begin > min_len:
             events.append((begin, end, f, float(frames[begin:end, f].mean())))
 
