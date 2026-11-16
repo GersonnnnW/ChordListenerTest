@@ -4,7 +4,8 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from chordlistener import export
-from chordlistener.score import ScoreOptions, build_score, split_duration
+from chordlistener.document import ScoreOptions, build_score
+from chordlistener.score import split_duration
 
 
 @pytest.mark.parametrize("bar", [12, 16])

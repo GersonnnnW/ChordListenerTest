@@ -4,17 +4,29 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.has("embed")) document.documentElement.classList.add("embed");
 
+const SHOW_KEYS = ["notes", "chords", "lyrics", "key", "tempo"];
+
 const state = {
   id: null,
-  result: null,
   source: null,
+  doc: null, // the editable score document (see chordlistener/document.py)
+  view: null, // how the server says the chords, key and tempo read right now
+  baseline: "", // the document as last saved, to know whether anything changed
+  canSave: false,
+  edited: false,
+  editing: false,
+  undo: [],
+  redo: [],
+  sel: null, // selected note or rest on the sheet
+  hits: [], // clickable things on the sheet
   transpose: 0,
   arrangement: "piano",
+  show: loadShow(),
   objectUrl: null,
   input: null, // what was analysed, so it can be re-run with other settings
   tempo: "auto",
-  sheetKey: null, // what the sheet view currently shows
   osmd: null,
+  sheetStale: true,
   beatEls: [],
   barEls: [],
   lastBeat: -1,
@@ -62,6 +74,7 @@ async function api(path, options) {
   } catch {
     throw new Error("Could not reach the server. Check your connection and try again.");
   }
+  if (response.status === 204) return null;
   const isJson = (response.headers.get("content-type") || "").includes("json");
   const body = isJson ? await response.json() : await response.text();
   if (!response.ok && response.status !== 202) {
@@ -70,6 +83,65 @@ async function api(path, options) {
   }
   return body;
 }
+
+function store(key, value) {
+  try {
+    if (value === undefined) return JSON.parse(localStorage.getItem(key));
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* private browsing: carry on without remembering */ }
+  return null;
+}
+
+function loadShow() {
+  const saved = store("cl-show") || {};
+  const out = {};
+  for (const key of SHOW_KEYS) out[key] = saved[key] !== false;
+  return out;
+}
+
+// The token that proves this browser created a transcription and may save changes to it.
+function tokenHeader() {
+  const tokens = store("cl-edit-tokens") || {};
+  return tokens[state.id] ? { "X-Edit-Token": tokens[state.id] } : {};
+}
+
+function rememberToken(id, token) {
+  const tokens = store("cl-edit-tokens") || {};
+  tokens[id] = token;
+  const ids = Object.keys(tokens);
+  for (const old of ids.slice(0, Math.max(0, ids.length - 60))) delete tokens[old];
+  store("cl-edit-tokens", tokens);
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = el("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function fileStem() {
+  const title = (state.doc && state.doc.title) || "transcription";
+  return title.replace(/[^\p{L}\p{N} _-]+/gu, "_").trim().slice(0, 80) || "transcription";
+}
+
+const scripts = {};
+function loadScript(src) {
+  // Large libraries are only fetched when first needed.
+  scripts[src] = scripts[src] || new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () => { delete scripts[src]; reject(new Error("Could not load part of the page. Please try again.")); };
+    document.head.append(script);
+  });
+  return scripts[src];
+}
+const loadEngraver = () => loadScript("/static/vendor/opensheetmusicdisplay.min.js");
 
 // ---------------------------------------------------------------- search
 
@@ -165,12 +237,13 @@ async function submit() {
   show("working");
   try {
     let body = await api("/v1/transcriptions", { method: "POST", body: form });
+    if (body.edit_token) rememberToken(body.id, body.edit_token);
     while (body.status === "processing") {
       await new Promise((resolve) => setTimeout(resolve, 1200));
       body = await api(`/v1/transcriptions/${body.id}`);
     }
     if (body.status !== "completed") throw new Error((body.error && body.error.message) || "The analysis failed.");
-    present(body, input.audioUrl);
+    await present(body, input.audioUrl);
   } catch (error) {
     fail(error.message);
   } finally {
@@ -183,6 +256,7 @@ function retime(direction) {
   const order = ["half", "auto", "double"];
   const next = order[order.indexOf(state.tempo) + direction];
   if (!next || !state.input) return;
+  if (isDirty() && !confirm("Re-analysing at a different tempo starts a fresh transcription. Your unsaved corrections will be lost. Continue?")) return;
   $("audio").pause();
   state.tempo = next;
   submit();
@@ -201,24 +275,23 @@ function releaseAudio() {
 
 // ---------------------------------------------------------------- result
 
-function present(body, audioUrl) {
+async function present(body, audioUrl) {
   state.id = body.id;
   state.source = body.source;
   state.transpose = 0;
-  state.sheetKey = null;
-  $("sheet").replaceChildren();
-  $("sheet-status").textContent = "";
+  state.undo = [];
+  state.redo = [];
+  state.sel = null;
+  setEditing(false, true);
+  await loadScore();
 
   const source = body.source;
-  $("song-title").textContent = source.title || (source.filename || "Untitled").replace(/\.[^.]+$/, "");
-  $("song-artist").textContent = source.artist || "";
   $("artwork").hidden = !source.artwork_url;
   if (source.artwork_url) $("artwork").src = source.artwork_url;
   $("clip-note").hidden = source.type !== "catalog";
 
-  const player = $("player");
   const url = audioUrl || source.preview_url || "";
-  player.classList.toggle("silent", !url);
+  $("player").classList.toggle("silent", !url);
   if (url && $("audio").getAttribute("src") !== url) $("audio").src = url;
   $("half").hidden = $("double").hidden = !state.input;
   $("half").disabled = state.tempo === "half";
@@ -226,48 +299,81 @@ function present(body, audioUrl) {
   setPlaying(false);
   $("seek").value = 0;
 
-  applyResult(body.result);
+  $("sheet").replaceChildren();
+  state.osmd = null;
+  state.sheetStale = true;
   selectTab("chords");
+  draw();
   show("result");
   history.replaceState(null, "", `?${params.has("embed") ? "embed=1&" : ""}t=${encodeURIComponent(body.id)}`);
   window.scrollTo({ top: 0 });
 }
 
-function applyResult(result) {
-  state.result = result;
-  $("fact-key").textContent = result.key.name;
-  $("fact-tempo").textContent = `${Math.round(result.tempo_bpm)} bpm`;
-  $("fact-time").textContent = result.time_signature;
+async function loadScore(original) {
+  const score = await api(`/v1/transcriptions/${state.id}/score${original ? "?original=true" : ""}`, { headers: tokenHeader() });
+  state.doc = score.document;
+  state.view = score.view;
+  state.canSave = score.can_save;
+  state.edited = score.edited && !original;
+  state.baseline = JSON.stringify(state.doc);
+}
+
+/** Bring everything on the page in line with state.doc / state.view. */
+function draw() {
+  const { doc, view } = state;
+  $("song-title").textContent = doc.title || "Untitled";
+  $("song-artist").textContent = doc.artist || "";
+  $("fact-key").textContent = view.key.name;
+  $("fact-tempo").textContent = `${Math.round(view.tempo_bpm)} bpm`;
+  $("fact-time").textContent = view.time_signature;
   $("semitones").textContent = (state.transpose > 0 ? "+" : "") + state.transpose;
-  $("seek").max = result.duration;
-  renderChart(result);
+  $("seek").max = Math.max(view.duration, (state.source && state.source.audio_seconds) || 0);
+  applyShow();
+  renderChart();
+  drawEditBar();
   state.lastBeat = -1;
   state.lastChord = -2;
   sync();
-
-  const base = `/v1/transcriptions/${state.id}`;
-  const shift = `transpose=${state.transpose}`;
-  $("dl-xml").href = `${base}/musicxml?arrangement=${state.arrangement}&${shift}&download=true`;
-  $("dl-midi").href = `${base}/midi?${shift}`;
-  $("dl-chart").href = `${base}/chart?${shift}&download=true`;
-  $("dl-json").href = `${base}?${shift}`;
 }
 
-function renderChart(result) {
-  const perBar = parseInt(result.time_signature, 10) || 4;
-  const bars = Math.max(1, Math.floor((result.beats.length - 1) / perBar));
-  const starts = new Map(); // global beat index -> chord symbol
-  for (const chord of result.chords) starts.set((chord.bar - 1) * perBar + (chord.beat - 1), chord.chord);
+function applyShow() {
+  for (const button of document.querySelectorAll("[data-show]")) {
+    button.setAttribute("aria-pressed", String(state.show[button.dataset.show]));
+  }
+  $("chip-key").hidden = !state.show.key;
+  $("chip-tempo").hidden = !state.show.tempo;
+  $("result").classList.toggle("hide-chords", !state.show.chords);
+  $("result").classList.toggle("hide-lyrics", !state.show.lyrics);
+  document.querySelector(".segmented").hidden = !state.show.notes; // a chord sheet has no piano/lead choice
+}
+
+for (const button of document.querySelectorAll("[data-show]")) {
+  button.addEventListener("click", () => {
+    const key = button.dataset.show;
+    state.show[key] = !state.show[key];
+    store("cl-show", state.show);
+    applyShow();
+    state.sel = null;
+    state.sheetStale = true;
+    if (!$("view-sheet").hidden) refresh();
+  });
+}
+
+function renderChart() {
+  const { doc, view } = state;
+  const perBar = doc.beats_per_bar;
+  const starts = new Map(); // global beat index -> chord symbol as shown
+  for (const chord of view.chords) starts.set((chord.bar - 1) * perBar + (chord.beat - 1), chord.chord);
 
   const chart = $("chart");
   chart.replaceChildren();
   state.beatEls = [];
   state.barEls = [];
   let carried = "";
-  for (let bar = 0; bar < bars; bar++) {
-    const cell = el("button", "bar");
-    cell.type = "button";
+  for (let bar = 0; bar < view.bars; bar++) {
+    const cell = el("div", "bar");
     cell.append(el("span", "n", String(bar + 1)));
+    const beats = el("div", "beats");
     let changes = 0;
     for (let beat = 0; beat < perBar; beat++) {
       const index = bar * perBar + beat;
@@ -278,12 +384,27 @@ function renderChart(result) {
       if (symbol === undefined || symbol === "") span.classList.add("held");
       else if (symbol === "N.C.") { span.classList.add("rest"); span.textContent = "–"; }
       else span.textContent = symbol;
-      cell.append(span);
+      if (state.editing) span.addEventListener("click", () => editChord(index, span));
+      beats.append(span);
       state.beatEls.push(span);
     }
     if (changes > 2) cell.classList.add("dense");
-    cell.addEventListener("click", () => seekTo(result.beats[bar * perBar]));
-    cell.setAttribute("aria-label", `Bar ${bar + 1}`);
+    cell.append(beats);
+
+    const words = doc.lyrics[String(bar)] || "";
+    if (state.editing) {
+      const input = el("input", "lyric-input");
+      input.type = "text";
+      input.value = words;
+      input.maxLength = 200;
+      input.placeholder = "lyrics";
+      input.setAttribute("aria-label", `Lyrics for bar ${bar + 1}`);
+      input.addEventListener("change", () => setLyric(bar, input.value));
+      cell.append(input);
+    } else {
+      cell.append(el("div", "lyric", words));
+      cell.addEventListener("click", () => seekTo(view.beats[bar * perBar]));
+    }
     chart.append(cell);
     state.barEls.push(cell);
   }
@@ -302,7 +423,7 @@ $("play").addEventListener("click", () => { if (audio.paused) audio.play().catch
 audio.addEventListener("play", () => { setPlaying(true); requestAnimationFrame(tick); });
 audio.addEventListener("pause", () => setPlaying(false));
 audio.addEventListener("ended", () => setPlaying(false));
-audio.addEventListener("timeupdate", sync);
+audio.addEventListener("timeupdate", () => sync());
 audio.addEventListener("error", () => { if (audio.getAttribute("src")) $("player").classList.add("silent"); });
 $("seek").addEventListener("input", () => seekTo(parseFloat($("seek").value)));
 
@@ -317,15 +438,15 @@ function tick() {
 }
 
 function sync(at) {
-  const result = state.result;
-  if (!result) return;
+  const view = state.view;
+  if (!view) return;
   const time = typeof at === "number" ? at : audio.currentTime || 0;
   if (document.activeElement !== $("seek")) $("seek").value = time;
-  $("clock").textContent = `${clock(time)} / ${clock(result.duration)}`;
+  $("clock").textContent = `${clock(time)} / ${clock(parseFloat($("seek").max))}`;
 
-  const beat = Math.min(lastAtOrBefore(result.beats, time), state.beatEls.length - 1);
+  const beat = Math.min(lastAtOrBefore(view.beats, time), state.beatEls.length - 1);
   if (beat !== state.lastBeat) {
-    const perBar = parseInt(result.time_signature, 10) || 4;
+    const perBar = state.doc.beats_per_bar;
     const before = state.beatEls[state.lastBeat];
     if (before) before.classList.remove("on");
     const oldBar = state.barEls[Math.floor(state.lastBeat / perBar)];
@@ -335,12 +456,12 @@ function sync(at) {
     const bar = state.barEls[Math.floor(beat / perBar)];
     if (bar) {
       bar.classList.add("active");
-      if (!audio.paused && !$("view-chords").hidden) bar.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      if (!audio.paused && !$("view-chords").hidden && !state.editing) bar.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
     state.lastBeat = beat;
   }
 
-  const chords = result.chords;
+  const chords = view.chords;
   let index = -1;
   for (let lo = 0, hi = chords.length - 1; lo <= hi; ) {
     const mid = (lo + hi) >> 1;
@@ -390,19 +511,54 @@ function drawKeys(notes, root) {
   $("keys").replaceChildren(svg);
 }
 
+// ---------------------------------------------------------------- rendering through the server
+
+function renderRequest(extra) {
+  return api("/v1/score/render", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ document: state.doc, arrangement: state.arrangement, transpose: state.transpose, show: state.show, ...extra }),
+  });
+}
+
+let refreshSeq = 0;
+let refreshTimer = 0;
+
+/** Ask the server how the current document reads, and redraw. Returns false if the document was refused. */
+async function refresh() {
+  clearTimeout(refreshTimer);
+  const seq = ++refreshSeq;
+  const wantSheet = !$("view-sheet").hidden;
+  if (wantSheet) $("sheet-status").textContent = "Updating…";
+  let out;
+  try {
+    out = await renderRequest({ musicxml: wantSheet });
+  } catch (error) {
+    if (seq === refreshSeq) $("sheet-status").textContent = error.message;
+    return false;
+  }
+  if (seq !== refreshSeq) return true; // something newer is on its way
+  state.doc = out.document;
+  state.view = out.view;
+  draw();
+  if (wantSheet) await drawSheet(out.musicxml);
+  else state.sheetStale = true;
+  return true;
+}
+
+function refreshSoon() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, 160);
+}
+
 // ---------------------------------------------------------------- transpose
 
-async function transposeBy(step) {
+function transposeBy(step) {
+  if (state.editing) return;
   const next = Math.max(-11, Math.min(11, state.transpose + step));
   if (next === state.transpose || !state.id) return;
-  try {
-    const body = await api(`/v1/transcriptions/${state.id}?notes=false&transpose=${next}`);
-    state.transpose = next;
-    applyResult(body.result);
-    if (!$("view-sheet").hidden) renderSheet();
-  } catch (error) {
-    $("sheet-status").textContent = error.message;
-  }
+  state.transpose = next;
+  refresh();
 }
 $("down").addEventListener("click", () => transposeBy(-1));
 $("up").addEventListener("click", () => transposeBy(1));
@@ -414,7 +570,8 @@ function selectTab(name) {
     $(`tab-${tab}`).setAttribute("aria-selected", String(tab === name));
     $(`view-${tab}`).hidden = tab !== name;
   }
-  if (name === "sheet") renderSheet();
+  if (name === "sheet" && state.sheetStale && state.doc) refresh();
+  drawInspector();
 }
 $("tab-chords").addEventListener("click", () => selectTab("chords"));
 $("tab-sheet").addEventListener("click", () => selectTab("sheet"));
@@ -425,67 +582,701 @@ for (const button of document.querySelectorAll("[data-arrangement]")) {
     for (const other of document.querySelectorAll("[data-arrangement]")) {
       other.setAttribute("aria-pressed", String(other === button));
     }
-    applyResult(state.result);
-    renderSheet();
+    state.sel = null;
+    refresh();
   });
 }
-$("print").addEventListener("click", () => window.print());
 
-let engraver = null;
-function loadEngraver() {
-  // The notation renderer is large, so it is only fetched when first needed.
-  engraver = engraver || new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "/static/vendor/opensheetmusicdisplay.min.js";
-    script.onload = resolve;
-    script.onerror = () => { engraver = null; reject(new Error("Could not load the sheet music renderer.")); };
-    document.head.append(script);
-  });
-  return engraver;
+function engraverOptions(extra) {
+  return {
+    backend: "svg",
+    autoResize: false,
+    autoBeam: true,
+    drawTitle: true,
+    drawSubtitle: true,
+    drawComposer: true,
+    drawPartNames: false,
+    drawMeasureNumbers: true,
+    ...extra,
+  };
 }
 
-async function renderSheet() {
-  const key = `${state.id}|${state.arrangement}|${state.transpose}`;
-  if (state.sheetKey === key) return;
-  state.sheetKey = key;
-  const status = $("sheet-status");
-  status.textContent = "Engraving the sheet music…";
+function newEngraver(container, extra) {
+  const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(container, engraverOptions(extra));
   try {
-    const [xml] = await Promise.all([
-      api(`/v1/transcriptions/${state.id}/musicxml?arrangement=${state.arrangement}&transpose=${state.transpose}`),
-      loadEngraver(),
-    ]);
-    if (state.sheetKey !== key) return; // the user moved on while this loaded
-    if (!state.osmd) {
-      state.osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay($("sheet"), {
-        backend: "svg",
-        autoResize: true,
-        autoBeam: true,
-        drawTitle: true,
-        drawComposer: true,
-        drawPartNames: false,
-        drawMeasureNumbers: true,
-      });
-    }
+    // "C6" is how musicians write it; the renderer's default is "Cmaj6".
+    osmd.EngravingRules.ChordSymbolLabelTexts.setValue(opensheetmusicdisplay.ChordSymbolEnum.majorsixth, "6");
+  } catch { /* cosmetic only */ }
+  return osmd;
+}
+
+let drawSeq = 0;
+async function drawSheet(xml) {
+  const seq = ++drawSeq;
+  const status = $("sheet-status");
+  try {
+    await loadEngraver();
+    if (!state.osmd) state.osmd = newEngraver($("sheet"));
     await state.osmd.load(xml);
-    if (state.sheetKey !== key) return;
+    if (seq !== drawSeq) return;
+    state.osmd.zoom = window.innerWidth < 720 ? 0.7 : 0.85;
     state.osmd.render();
-    status.textContent = "";
+    state.sheetStale = false;
+    status.textContent = sheetHint();
+    bindSheet();
   } catch (error) {
-    if (state.sheetKey === key) {
-      state.sheetKey = null;
-      status.textContent = error.message || "The sheet music could not be drawn.";
-    }
+    if (seq === drawSeq) status.textContent = error.message || "The sheet music could not be drawn.";
   }
+}
+
+function sheetHint() {
+  if (!state.editing) return "";
+  return state.show.notes ? "Click a note or a rest to change it." : "Turn on Notes to edit the notes.";
+}
+
+let resizeTimer = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (state.osmd && !$("view-sheet").hidden && !state.sheetStale) {
+      state.osmd.render();
+      bindSheet();
+    }
+  }, 250);
+});
+
+// ---------------------------------------------------------------- editing: the basics
+
+function isDirty() {
+  return Boolean(state.doc) && JSON.stringify(state.doc) !== state.baseline;
+}
+
+/** Change the document. Every change goes through here so that it can be undone. */
+function edit(change, redraw = "all") {
+  const before = JSON.stringify(state.doc);
+  change(state.doc);
+  if (JSON.stringify(state.doc) === before) return;
+  state.undo.push(before);
+  if (state.undo.length > 60) state.undo.shift();
+  state.redo = [];
+  state.sheetStale = true;
+  drawEditBar();
+  drawInspector();
+  if (redraw === "all") refreshSoon();
+}
+
+async function step(from, to) {
+  if (!from.length) return;
+  to.push(JSON.stringify(state.doc));
+  state.doc = JSON.parse(from.pop());
+  state.sel = null;
+  await refresh();
+}
+$("undo").addEventListener("click", () => step(state.undo, state.redo));
+$("redo").addEventListener("click", () => step(state.redo, state.undo));
+
+function setEditing(on, quiet) {
+  state.editing = on;
+  state.sel = null;
+  $("result").classList.toggle("editing", on);
+  $("editbar").hidden = !on;
+  $("edit").hidden = on;
+  $("down").disabled = $("up").disabled = on;
+  if (quiet) return;
+  if (on && state.transpose !== 0) state.transpose = 0; // corrections are made at the original pitch
+  state.sheetStale = true;
+  refresh();
+}
+
+$("edit").addEventListener("click", () => setEditing(true));
+$("done").addEventListener("click", async () => {
+  if (isDirty() && state.canSave && confirm("Save your changes before you finish?")) await save();
+  setEditing(false);
+});
+
+function drawEditBar() {
+  if (!state.doc) return;
+  const dirty = isDirty();
+  const status = $("edit-status");
+  status.classList.toggle("warn", dirty && state.canSave);
+  if (!state.canSave) status.textContent = "You can make changes and download them. Only the person who created this transcription can save them here.";
+  else if (dirty) status.textContent = "Unsaved changes";
+  else status.textContent = state.edited ? "All changes saved" : "";
+  $("undo").disabled = !state.undo.length;
+  $("redo").disabled = !state.redo.length;
+  $("save").disabled = !dirty || !state.canSave;
+  $("revert").disabled = !state.edited && !state.undo.length;
+  const fields = { "ed-title": state.doc.title, "ed-artist": state.doc.artist, "ed-bpm": Math.round(state.doc.bpm), "ed-key": `${state.doc.key.tonic}:${state.doc.key.minor ? 1 : 0}` };
+  for (const [id, value] of Object.entries(fields)) {
+    if (document.activeElement !== $(id)) $(id).value = value;
+  }
+}
+
+async function save() {
+  try {
+    const out = await api(`/v1/transcriptions/${state.id}/score`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...tokenHeader() },
+      body: JSON.stringify(state.doc),
+    });
+    state.doc = out.document;
+    state.baseline = JSON.stringify(state.doc);
+    state.edited = true;
+    drawEditBar();
+    return true;
+  } catch (error) {
+    $("edit-status").textContent = error.message;
+    $("edit-status").classList.add("warn");
+    return false;
+  }
+}
+$("save").addEventListener("click", save);
+
+$("revert").addEventListener("click", async () => {
+  if (!confirm("Throw away all corrections and go back to the automatic transcription?")) return;
+  try {
+    if (state.canSave && state.edited) await api(`/v1/transcriptions/${state.id}/score`, { method: "DELETE", headers: tokenHeader() });
+    await loadScore(!state.canSave);
+    state.undo = [];
+    state.redo = [];
+    state.sel = null;
+    state.sheetStale = true;
+    await refresh();
+  } catch (error) {
+    $("edit-status").textContent = error.message;
+  }
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (state.canSave && isDirty()) event.preventDefault();
+});
+
+// Song details
+const MAJOR_KEYS = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+const MINOR_KEYS = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"];
+for (const [names, minor] of [[MAJOR_KEYS, 0], [MINOR_KEYS, 1]]) {
+  names.forEach((name, tonic) => {
+    const option = el("option", "", `${name} ${minor ? "minor" : "major"}`);
+    option.value = `${tonic}:${minor}`;
+    $("ed-key").append(option);
+  });
+}
+$("ed-title").addEventListener("change", () => edit((doc) => { doc.title = $("ed-title").value.trim(); }));
+$("ed-artist").addEventListener("change", () => edit((doc) => { doc.artist = $("ed-artist").value.trim(); }));
+$("ed-key").addEventListener("change", () => edit((doc) => {
+  const [tonic, minor] = $("ed-key").value.split(":").map(Number);
+  doc.key = { tonic, minor: Boolean(minor) };
+}));
+$("ed-bpm").addEventListener("change", () => edit((doc) => {
+  const bpm = Math.round(parseFloat($("ed-bpm").value));
+  if (bpm >= 20 && bpm <= 400) doc.bpm = bpm;
+}));
+
+// ---------------------------------------------------------------- editing: chords and lyrics
+
+function editChord(beat, span) {
+  if (span.querySelector("input")) return;
+  const existing = state.doc.chords.find((c) => c[0] === beat);
+  const input = el("input");
+  input.type = "text";
+  input.maxLength = 24;
+  input.value = existing ? existing[1] : "";
+  input.placeholder = "chord";
+  input.setAttribute("aria-label", "Chord");
+  span.classList.remove("held");
+  span.replaceChildren(input);
+  input.focus();
+  input.select();
+  let finished = false;
+  const finish = (commit) => {
+    if (finished) return;
+    finished = true;
+    const text = input.value.trim();
+    if (commit && text !== (existing ? existing[1] : "")) {
+      edit((doc) => {
+        doc.chords = doc.chords.filter((c) => c[0] !== beat);
+        if (text) doc.chords.push([beat, text]);
+        doc.chords.sort((a, b) => a[0] - b[0]);
+      });
+    } else {
+      renderChart();
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+function setLyric(bar, text) {
+  // The chart already shows what was typed, so there is nothing to redraw
+  // (and redrawing would take the cursor away from the next box).
+  edit((doc) => {
+    const clean = text.replace(/\s+/g, " ").trim();
+    if (clean) doc.lyrics[String(bar)] = clean;
+    else delete doc.lyrics[String(bar)];
+  }, "none");
+  state.view.has_lyrics = Object.keys(state.doc.lyrics).length > 0;
+}
+
+$("paste-lyrics").addEventListener("click", () => {
+  $("ly-start").max = state.view.bars;
+  $("lyrics-dialog").showModal();
+});
+$("ly-apply").addEventListener("click", () => {
+  const lines = $("ly-text").value.split("\n").map((line) => line.trim()).filter(Boolean);
+  const span = parseInt($("ly-span").value, 10) || 1;
+  const first = Math.max(1, parseInt($("ly-start").value, 10) || 1) - 1;
+  edit((doc) => {
+    lines.forEach((line, row) => {
+      // Share a line's words evenly between the bars it covers.
+      const words = line.split(/\s+/);
+      for (let part = 0; part < span; part++) {
+        const bar = first + row * span + part;
+        if (bar >= state.view.bars) return;
+        const chunk = words.slice(Math.round((part * words.length) / span), Math.round(((part + 1) * words.length) / span)).join(" ");
+        if (chunk) doc.lyrics[String(bar)] = chunk.slice(0, 200);
+        else delete doc.lyrics[String(bar)];
+      }
+    });
+  });
+  $("lyrics-dialog").close();
+  $("ly-text").value = "";
+});
+
+// ---------------------------------------------------------------- editing: notes on the sheet
+
+const staffEvents = (staff) => state.doc.arrangements[state.arrangement][staff] || [];
+const totalSixteenths = () => (state.doc.beats.length - 1) * 4;
+
+function eventAt(staff, position) {
+  const events = staffEvents(staff);
+  for (let i = 0; i < events.length; i++) {
+    if (events[i][0] <= position && position < events[i][0] + events[i][1]) return i;
+    if (events[i][0] > position) break;
+  }
+  return -1;
+}
+
+/** Make every note and rest on the sheet clickable. */
+function bindSheet() {
+  state.hits = [];
+  if (!state.osmd || !state.editing || !state.show.notes) { drawInspector(); return; }
+  const rows = state.osmd.GraphicSheet.MeasureList;
+  for (const row of rows) {
+    row.forEach((measure, staff) => {
+      if (!measure) return;
+      for (const entry of measure.staffEntries) {
+        for (const voice of entry.graphicalVoiceEntries) {
+          for (const note of voice.notes) {
+            const source = note.sourceNote;
+            const element = note.getSVGGElement && note.getSVGGElement();
+            if (!element || element.dataset.bound) continue; // the notes of a chord share one element
+            const position = Math.round(source.getAbsoluteTimestamp().RealValue * 16);
+            const rest = source.isRest();
+            const length = Math.max(1, Math.round(source.Length.RealValue * 16));
+            element.dataset.bound = "1";
+            element.classList.add("cl-hit");
+            element.addEventListener("click", () => pick(staff, position, rest, length));
+            state.hits.push({ element, staff, position, rest });
+          }
+        }
+      }
+    });
+  }
+  highlight();
+  drawInspector();
+}
+
+function pick(staff, position, rest, length) {
+  const index = eventAt(staff, position);
+  if (index >= 0) {
+    const event = staffEvents(staff)[index];
+    state.sel = { staff, start: event[0], pitch: event[2].length - 1 };
+  } else if (rest) {
+    state.sel = { staff, start: position, rest: true, length };
+  } else {
+    state.sel = null;
+  }
+  highlight();
+  drawInspector();
+}
+
+function selectedEvent() {
+  const sel = state.sel;
+  if (!sel || sel.rest) return null;
+  const events = staffEvents(sel.staff);
+  const index = events.findIndex((e) => e[0] === sel.start);
+  return index < 0 ? null : { events, index, event: events[index] };
+}
+
+function highlight() {
+  const sel = state.sel;
+  const found = selectedEvent();
+  for (const hit of state.hits) {
+    let on = false;
+    if (sel && hit.staff === sel.staff) {
+      if (sel.rest) on = hit.rest && hit.position === sel.start;
+      else if (found) on = !hit.rest && hit.position >= found.event[0] && hit.position < found.event[0] + found.event[1];
+    }
+    hit.element.classList.toggle("cl-sel", on);
+  }
+}
+
+const SHARPS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const FLATS = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+function noteName(pitch) {
+  const key = state.doc.key;
+  const major = key.minor ? (key.tonic + 3) % 12 : key.tonic;
+  const names = [5, 10, 3, 8, 1].includes(major) ? FLATS : SHARPS;
+  return names[pitch % 12] + (Math.floor(pitch / 12) - 1);
+}
+
+const LENGTHS = { 1: "sixteenth", 2: "eighth", 3: "dotted eighth", 4: "quarter", 6: "dotted quarter", 8: "half", 12: "dotted half", 16: "whole" };
+const lengthName = (n) => LENGTHS[n] || `${n} sixteenths`;
+
+function whereText(position) {
+  const bar = state.doc.beats_per_bar * 4;
+  const inside = position % bar;
+  const beat = Math.floor(inside / 4) + 1;
+  const part = ["", " and a quarter", " and a half", " and three quarters"][inside % 4];
+  return `Bar ${Math.floor(position / bar) + 1}, beat ${beat}${part}`;
+}
+
+function iconButton(label, text, action, disabled) {
+  const button = el("button", "icon", text);
+  button.type = "button";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.disabled = Boolean(disabled);
+  button.addEventListener("click", action);
+  return button;
+}
+
+function drawInspector() {
+  const box = $("inspector");
+  const sel = state.sel;
+  const visible = state.editing && !$("view-sheet").hidden && state.show.notes && sel;
+  box.hidden = !visible;
+  if (!visible) return;
+  box.replaceChildren();
+  const staffName = state.arrangement === "piano" ? (sel.staff === 0 ? "right hand" : "left hand") : "melody";
+
+  if (sel.rest) {
+    box.append(el("span", "where", `${whereText(sel.start)} · ${staffName} · rest`));
+    const add = el("button", "btn small primary", "Add a note here");
+    add.type = "button";
+    add.addEventListener("click", addNoteAtRest);
+    box.append(add);
+    return;
+  }
+  const found = selectedEvent();
+  if (!found) { state.sel = null; box.hidden = true; return; }
+  const [start, length, pitches] = found.event;
+  const next = found.events[found.index + 1];
+  const previous = found.events[found.index - 1];
+  const room = (next ? next[0] : totalSixteenths()) - start;
+  const floor = previous ? previous[0] + previous[1] : 0;
+  box.append(el("span", "where", `${whereText(start)} · ${staffName}`));
+
+  const notes = el("span", "group");
+  notes.append(el("span", "label", pitches.length > 1 ? "Notes" : "Note"));
+  pitches.forEach((pitch, i) => {
+    const chip = el("span", "pitch" + (i === sel.pitch ? " current" : ""));
+    const name = el("button", "name", noteName(pitch));
+    name.type = "button";
+    name.title = "Select this note";
+    name.addEventListener("click", () => { sel.pitch = i; drawInspector(); });
+    chip.append(
+      name,
+      iconButton("Higher", "▲", () => { sel.pitch = i; nudge(1); }, pitch >= 108),
+      iconButton("Lower", "▼", () => { sel.pitch = i; nudge(-1); }, pitch <= 21),
+      iconButton("Remove this note", "✕", () => { sel.pitch = i; removePitch(); }),
+    );
+    notes.append(chip);
+  });
+  const more = el("button", "btn small", "+ Note");
+  more.type = "button";
+  more.title = "Add another note to this chord";
+  more.disabled = pitches.length >= 8;
+  more.addEventListener("click", addPitch);
+  notes.append(more);
+  box.append(notes);
+
+  const size = el("span", "group");
+  size.append(
+    el("span", "label", "Length"),
+    iconButton("Shorter", "−", () => resize(-1), length <= 1),
+    el("span", "", lengthName(length)),
+    iconButton("Longer", "+", () => resize(1), length >= room),
+  );
+  box.append(size);
+
+  const move = el("span", "group");
+  move.append(
+    el("span", "label", "Move"),
+    iconButton("Earlier", "◀", () => shift(-1), start - 1 < floor),
+    iconButton("Later", "▶", () => shift(1), start + 1 + length > (next ? next[0] : totalSixteenths())),
+  );
+  box.append(move);
+}
+
+function onSelected(change) {
+  edit((doc) => {
+    const found = selectedEvent();
+    if (found) change(found, doc);
+  });
+  highlight();
+}
+
+function nudge(amount) {
+  onSelected(({ event }) => {
+    const sel = state.sel;
+    const target = event[2][sel.pitch] + amount;
+    if (target < 21 || target > 108 || event[2].includes(target)) return;
+    event[2][sel.pitch] = target;
+    event[2].sort((a, b) => a - b);
+    sel.pitch = event[2].indexOf(target);
+  });
+}
+
+function removePitch() {
+  onSelected(({ events, index, event }) => {
+    if (event[2].length > 1) {
+      event[2].splice(state.sel.pitch, 1);
+      state.sel.pitch = Math.min(state.sel.pitch, event[2].length - 1);
+    } else {
+      events.splice(index, 1);
+      state.sel = null;
+    }
+  });
+}
+
+function addPitch() {
+  onSelected(({ event }) => {
+    let target = event[2][event[2].length - 1] + 3;
+    while (event[2].includes(target)) target++;
+    if (target > 108) return;
+    event[2].push(target);
+    state.sel.pitch = event[2].length - 1;
+  });
+}
+
+function resize(amount) {
+  onSelected(({ events, index, event }) => {
+    const next = events[index + 1];
+    const room = (next ? next[0] : totalSixteenths()) - event[0];
+    event[1] = Math.max(1, Math.min(room, event[1] + amount));
+  });
+}
+
+function shift(amount) {
+  onSelected(({ events, index, event }) => {
+    const previous = events[index - 1];
+    const next = events[index + 1];
+    const start = event[0] + amount;
+    if (start < (previous ? previous[0] + previous[1] : 0)) return;
+    if (start + event[1] > (next ? next[0] : totalSixteenths())) return;
+    event[0] = start;
+    state.sel.start = start;
+  });
+}
+
+function addNoteAtRest() {
+  const sel = state.sel;
+  if (!sel || !sel.rest) return;
+  edit((doc) => {
+    const events = doc.arrangements[state.arrangement][sel.staff];
+    const after = events.findIndex((e) => e[0] > sel.start);
+    const next = after < 0 ? null : events[after];
+    const before = (after < 0 ? events[events.length - 1] : events[after - 1]) || null;
+    const room = (next ? next[0] : totalSixteenths()) - sel.start;
+    if (room < 1 || eventAt(sel.staff, sel.start) >= 0) return;
+    // Start from the pitch of the neighbouring note: it is usually close.
+    const neighbour = before || next;
+    const fallback = state.arrangement === "piano" && sel.staff === 1 ? 48 : 67;
+    const pitch = neighbour ? neighbour[2][neighbour[2].length - 1] : fallback;
+    events.splice(after < 0 ? events.length : after, 0, [sel.start, Math.min(sel.length, room), [pitch]]);
+    state.sel = { staff: sel.staff, start: sel.start, pitch: 0 };
+  });
+  highlight();
+}
+
+function stepSelection(direction) {
+  const found = selectedEvent();
+  if (!found) return;
+  const target = found.events[found.index + direction];
+  if (!target) return;
+  state.sel = { staff: state.sel.staff, start: target[0], pitch: target[2].length - 1 };
+  highlight();
+  drawInspector();
+}
+
+document.addEventListener("keydown", (event) => {
+  if (!state.editing || $("result").hidden) return;
+  if (document.querySelector("dialog[open]")) return;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
+  const command = event.ctrlKey || event.metaKey;
+  if (command && event.key.toLowerCase() === "s") { event.preventDefault(); if (state.canSave) save(); return; }
+  if (typing) return;
+  if (command && event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? step(state.redo, state.undo) : step(state.undo, state.redo); return; }
+  if (command && event.key.toLowerCase() === "y") { event.preventDefault(); step(state.redo, state.undo); return; }
+  if (!state.sel || state.sel.rest || $("view-sheet").hidden || command) return;
+  const actions = {
+    ArrowUp: () => nudge(event.shiftKey ? 12 : 1),
+    ArrowDown: () => nudge(event.shiftKey ? -12 : -1),
+    ArrowLeft: () => stepSelection(-1),
+    ArrowRight: () => stepSelection(1),
+    Delete: removePitch,
+    Backspace: removePitch,
+    "[": () => resize(-1),
+    "]": () => resize(1),
+    Escape: () => { state.sel = null; highlight(); drawInspector(); },
+  };
+  if (actions[event.key]) { event.preventDefault(); actions[event.key](); }
+});
+
+// ---------------------------------------------------------------- download
+
+function downloadChoices() {
+  const show = {};
+  for (const key of SHOW_KEYS) show[key] = $(`dl-${key}`).checked && !$(`dl-${key}`).disabled;
+  const arrangement = document.querySelector('input[name="dl-arrangement"]:checked').value;
+  return { show, arrangement };
+}
+
+function syncDownloadDialog() {
+  const { show } = downloadChoices();
+  $("dl-layout").disabled = !show.notes;
+  $("dl-pdf").disabled = !(show.notes || show.chords || show.lyrics);
+}
+for (const key of SHOW_KEYS) $(`dl-${key}`).addEventListener("change", syncDownloadDialog);
+
+$("download").addEventListener("click", () => {
+  const hasLyrics = Object.keys(state.doc.lyrics).length > 0;
+  for (const key of SHOW_KEYS) $(`dl-${key}`).checked = state.show[key];
+  $("dl-lyrics").disabled = !hasLyrics;
+  $("dl-lyrics").checked = hasLyrics && state.show.lyrics;
+  $("dl-lyrics-hint").textContent = hasLyrics ? "" : "(none yet — add them with Edit)";
+  document.querySelector(`input[name="dl-arrangement"][value="${state.arrangement}"]`).checked = true;
+  $("dl-midi").href = `/v1/transcriptions/${state.id}/midi?transpose=${state.transpose}`;
+  $("dl-json").href = `/v1/transcriptions/${state.id}/score`;
+  $("dl-error").hidden = true;
+  syncDownloadDialog();
+  $("download-dialog").showModal();
+});
+
+async function withBusy(button, label, task) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  $("dl-error").hidden = true;
+  try {
+    await task();
+  } catch (error) {
+    $("dl-error").textContent = error.message || "The download could not be prepared.";
+    $("dl-error").hidden = false;
+  } finally {
+    button.textContent = original;
+    button.disabled = false;
+    syncDownloadDialog();
+  }
+}
+
+$("dl-xml").addEventListener("click", () => withBusy($("dl-xml"), "preparing…", async () => {
+  const out = await renderRequest({ ...downloadChoices(), musicxml: true });
+  saveBlob(new Blob([out.musicxml], { type: "application/vnd.recordare.musicxml+xml" }), `${fileStem()}.musicxml`);
+}));
+
+$("dl-chart").addEventListener("click", () => withBusy($("dl-chart"), "preparing…", async () => {
+  const out = await renderRequest({ ...downloadChoices(), musicxml: false, chart: true });
+  saveBlob(new Blob([out.chart], { type: "text/plain;charset=utf-8" }), `${fileStem()}.chords.txt`);
+}));
+
+$("dl-pdf").addEventListener("click", () => withBusy($("dl-pdf"), "Preparing PDF…", async () => {
+  const out = await renderRequest({ ...downloadChoices(), musicxml: true });
+  const pdf = await buildPdf(out.musicxml);
+  saveBlob(pdf.output("blob"), `${fileStem()}.pdf`);
+}));
+
+// The PDF's built-in fonts only cover Western European text. Everyday
+// typographic characters are swapped for plain ones; anything else (Greek,
+// Cyrillic, Chinese…) switches to embedding each page as an image.
+const PLAIN = { "‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", "…": "...", " ": " " };
+
+async function buildPdf(xml) {
+  await Promise.all([loadEngraver(), loadScript("/static/vendor/jspdf.umd.min.js")]);
+  await loadScript("/static/vendor/svg2pdf.umd.min.js");
+  xml = xml.replace(/[‘’“”–—… ]/g, (c) => PLAIN[c]);
+  const asImages = /[^\u0000-ÿ]/.test(xml);
+
+  const stage = $("pdf-stage");
+  stage.replaceChildren();
+  try {
+    const osmd = newEngraver(stage, { pageFormat: "A4_P", pageBackgroundColor: "#FFFFFF" });
+    await osmd.load(xml);
+    osmd.zoom = 0.72; // about four bars to a line on A4
+    osmd.render();
+    const pages = [...stage.querySelectorAll("svg")];
+    if (!pages.length) throw new Error("There is nothing to put in the PDF.");
+    // The PDF converter misplaces text that relies on preserved leading spaces
+    // (the "= 120" of the tempo mark), so turn those spaces into an offset.
+    for (const text of stage.querySelectorAll("text")) {
+      if (!text.hasAttribute("xml:space")) continue;
+      const lead = text.textContent.length - text.textContent.trimStart().length;
+      text.removeAttribute("xml:space");
+      text.textContent = text.textContent.trim();
+      text.setAttribute("x", parseFloat(text.getAttribute("x")) + lead * 4);
+      const size = /^([\d.]+)pt$/.exec(text.getAttribute("font-size") || "");
+      if (size) text.setAttribute("font-size", `${(parseFloat(size[1]) * 4) / 3}px`);
+    }
+    const pdf = new jspdf.jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
+    const [width, height] = [210, 297];
+    for (let i = 0; i < pages.length; i++) {
+      if (i) pdf.addPage();
+      if (asImages) pdf.addImage(await rasterise(pages[i]), "PNG", 0, 0, width, height, undefined, "FAST");
+      else await pdf.svg(pages[i], { x: 0, y: 0, width, height });
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(8);
+      pdf.setTextColor(140);
+      pdf.text(`${i + 1} / ${pages.length}`, width / 2, height - 7, { align: "center" });
+    }
+    return pdf;
+  } finally {
+    stage.replaceChildren();
+  }
+}
+
+function rasterise(svg) {
+  return new Promise((resolve, reject) => {
+    const copy = svg.cloneNode(true);
+    copy.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1654; // A4 at 200 dpi
+      canvas.height = 2339;
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    image.onerror = () => reject(new Error("The PDF page could not be drawn."));
+    image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(copy));
+  });
 }
 
 // ---------------------------------------------------------------- start over / deep links
 
 $("again").addEventListener("click", () => {
+  if (state.canSave && isDirty() && !confirm("You have unsaved corrections. Leave without saving?")) return;
   releaseAudio();
   state.input = null;
   state.id = null;
-  state.result = null;
+  state.doc = null;
+  state.view = null;
   history.replaceState(null, "", params.has("embed") ? "?embed=1" : location.pathname);
   $("search").value = "";
   $("results").replaceChildren();
@@ -500,7 +1291,7 @@ $("again").addEventListener("click", () => {
   try {
     const body = await api(`/v1/transcriptions/${encodeURIComponent(id)}?notes=false`);
     if (body.status !== "completed") throw new Error("That transcription is not available.");
-    present(body, null);
+    await present(body, null);
   } catch (error) {
     history.replaceState(null, "", location.pathname);
     fail(error.message);

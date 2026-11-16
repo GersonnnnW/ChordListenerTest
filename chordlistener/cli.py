@@ -11,7 +11,7 @@ import sys
 def _analyze(args: argparse.Namespace) -> int:
     from . import AnalysisOptions, analyze, export
     from .audio import AudioError
-    from .score import ScoreOptions
+    from .document import ScoreOptions
 
     try:
         scale = {"auto": 1.0, "half": 0.5, "double": 2.0}[args.tempo]

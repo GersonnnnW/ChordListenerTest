@@ -69,6 +69,8 @@ const { id, result } = await response.json();
 
 `200` when complete, `202` while processing, `422` if the audio could not be analysed.
 
+Requests made **without** an API key also get an `"edit_token"` in this response, once. Send it as the `X-Edit-Token` header to save corrections to that transcription later. Requests made with a key do not need it: the key is the credential.
+
 ```json
 {
   "id": "tr_Zk3q9oXc1vJ8mB2nR5tY7w",
@@ -97,6 +99,7 @@ const { id, result } = await response.json();
   },
   "links": {
     "self": "/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w",
+    "score": "/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w/score",
     "musicxml": "/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w/musicxml",
     "midi": "/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w/midi",
     "chart": "/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w/chart"
@@ -126,13 +129,68 @@ Field notes:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /v1/transcriptions/{id}/musicxml` | MusicXML 4.0. `arrangement=piano` (two staves, all notes, chord symbols) or `arrangement=lead` (melody line with chord symbols) |
+| `GET /v1/transcriptions/{id}/musicxml` | MusicXML 4.0. `arrangement=piano` (two staves, all notes) or `arrangement=lead` (melody line) |
+| `GET /v1/transcriptions/{id}/chart` | Plain-text chord chart, one cell per bar, lyrics under each row |
 | `GET /v1/transcriptions/{id}/midi` | Standard MIDI file with the detected notes at their original timing and chord names as markers |
-| `GET /v1/transcriptions/{id}/chart` | Plain-text chord chart, one cell per bar |
 
-All three accept `transpose`. `musicxml` and `chart` accept `download=true` to add a `Content-Disposition: attachment` header. They are generated on request from the stored analysis and take a few milliseconds.
+`musicxml` and `chart` reflect any saved corrections (see the next section) and accept these switches, all `true` by default:
 
-MusicXML opens in MuseScore, Sibelius, Finale, Dorico, Logic and most other notation software, and renders in the browser with OpenSheetMusicDisplay.
+| Query | Effect when `false` |
+|---|---|
+| `notes` | *(musicxml only)* a chord sheet: one rhythm slash per beat instead of the notes |
+| `chords` | no chord symbols |
+| `lyrics` | no lyrics |
+| `tempo` | no tempo mark and no "Tempo: … BPM" in the heading |
+| `key` | no "Key: …" in the heading (the key signature itself always stays) |
+
+Also: `transpose` (−11 to 11), `original=true` to ignore saved corrections, and `download=true` to add a `Content-Disposition: attachment` header. All of these are generated on request and take a few milliseconds. `midi` always contains the notes as detected.
+
+MusicXML opens in MuseScore, Sibelius, Finale, Dorico, Logic and most other notation software, and renders in the browser with OpenSheetMusicDisplay. The website turns it into a PDF in the browser; the API does not produce PDFs.
+
+## The editable score
+
+Every finished transcription has a *score document*: plain JSON holding what is printed — chords, notes laid out per staff, lyrics, key, tempo, title. It starts as the automatic transcription; people correct it and save it back.
+
+```json
+{
+  "version": 1,
+  "title": "Let It Be", "artist": "The Beatles",
+  "key": {"tonic": 0, "minor": false},
+  "bpm": 73.0,
+  "beats_per_bar": 4,
+  "beats": [0.51, 1.33, 2.15],
+  "chords": [[0, "C"], [2, "G"], [4, "Am"], [6, "Fmaj7"]],
+  "lyrics": {"0": "When I find myself in", "1": "times of trouble"},
+  "arrangements": {
+    "piano": [[[0, 4, [60, 64, 67]], [4, 2, [72]]], [[0, 8, [36]]]],
+    "lead":  [[[0, 4, [67]], [4, 2, [72]]]]
+  }
+}
+```
+
+- `key.tonic` is a pitch class (C = 0 … B = 11).
+- `beats` are the beat times in seconds, with one extra entry for the final bar line. They tie the score to the recording; keep them as given.
+- `chords` are `[beat index, symbol]`. The symbol is free text. Recognised chord symbols (`F#m7`, `Bb/D`, `Csus4`, `G7sus4`, `Eadd9`, `A5` …) are transposed and exported as proper chord symbols; anything else is printed as written. `N.C.` means no chord.
+- `lyrics` maps a bar index (from 0, as a string) to the words sung in that bar.
+- `arrangements` has `piano` (two staves: right hand, left hand) and `lead` (one staff). Each staff is a list of `[start, length, [pitches]]`, measured in sixteenth notes from the start of the piece; pitches are MIDI numbers at the original pitch. Notes on one staff may not overlap: a note that runs into the next is shortened, and several notes sounding together are one entry with several pitches. Gaps are rests.
+
+| Endpoint | |
+|---|---|
+| `GET /v1/transcriptions/{id}/score` | `{"document": …, "edited": bool, "can_save": bool, "view": …}`. `original=true` returns the automatic version; `transpose` affects `view` |
+| `PUT /v1/transcriptions/{id}/score` | Save a corrected document (the request body). Needs the API key that created the transcription, or its `X-Edit-Token`; otherwise `403`. A malformed document is refused with `400` and a message saying what is wrong |
+| `DELETE /v1/transcriptions/{id}/score` | Discard the corrections; the automatic version is back |
+| `POST /v1/score/render` | Render a document without storing anything |
+
+`view` is the document as a client should display it at the requested transposition: the key name, tempo, bar count, and each chord with its start and end time, displayed symbol and note names.
+
+`POST /v1/score/render` takes
+
+```json
+{"document": {}, "arrangement": "piano", "transpose": 0, "musicxml": true, "chart": false,
+ "show": {"notes": true, "chords": true, "lyrics": true, "tempo": true, "key": true}}
+```
+
+and returns the validated `document`, its `view`, and the `musicxml` and/or `chart` text. This is what the website's editor calls after every change, so unsaved edits can be previewed and downloaded.
 
 ## Delete a transcription
 
@@ -194,6 +252,7 @@ Every error has the same shape:
 |---|---|---|
 | 400 | `bad_request` | Missing or conflicting fields, unknown option value |
 | 401 | `unauthorized` | Missing, invalid or revoked key |
+| 403 | `forbidden` | Saving or discarding corrections without the key or edit token that created the transcription |
 | 404 | `not_found` | Unknown ID, or a transcription that belongs to another key |
 | 409 | `not_ready` | Asked for sheet music of a transcription still processing |
 | 413 | `file_too_large` | Upload over the size limit |

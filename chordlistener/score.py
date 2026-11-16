@@ -1,8 +1,8 @@
-"""Turn a performance (notes in seconds) into notation (notes in bars).
+"""Notation building blocks: bars made of notes, chords and rests.
 
 Everything here is on a grid of sixteenth notes. A `Score` is a list of
-measures; each measure holds, per staff, a gap-free run of `Element`s (notes,
-chords of notes, or rests) whose durations are all directly notatable.
+measures; each measure holds, per staff, a gap-free run of `Element`s whose
+durations are all directly notatable. `document.py` decides what goes in.
 """
 
 from __future__ import annotations
@@ -11,8 +11,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .pipeline import Analysis
-from .theory import Chord, Key
+from .theory import Key
 
 DIVISIONS = 4  # grid steps per quarter note
 
@@ -20,15 +19,8 @@ DIVISIONS = 4  # grid steps per quarter note
 _VALUES = [(16, "whole", 0), (12, "half", 1), (8, "half", 0), (6, "quarter", 1), (4, "quarter", 0), (3, "eighth", 1), (2, "eighth", 0), (1, "16th", 0)]
 NOTE_TYPES = {length: (kind, dots) for length, kind, dots in _VALUES}
 
-
-@dataclass
-class ScoreOptions:
-    arrangement: str = "piano"  # piano (two staves) | lead (melody line)
-    transpose: int = 0
-    title: str = ""
-    artist: str = ""
-    max_notes_per_chord: int = 4
-    include_chords: bool = True
+# One staff's music: (start, length, pitches), in sixteenths, never overlapping.
+Event = tuple[int, int, tuple[int, ...]]
 
 
 @dataclass
@@ -38,12 +30,24 @@ class Element:
     pitches: tuple[int, ...] = ()  # empty = rest
     tie_in: bool = False
     tie_out: bool = False
+    slash: bool = False  # rhythm slash: "play the chord", no specific notes
+    lyric: str = ""
+
+
+@dataclass
+class Harmony:
+    offset: int  # sixteenths from the start of the measure
+    text: str  # what to print if the chord cannot be expressed structurally
+    root: tuple[str, int] | None = None  # (step, alter)
+    quality: str | None = None
+    bass: tuple[str, int] | None = None
 
 
 @dataclass
 class Measure:
     staves: list[list[Element]]
-    harmonies: list[tuple[int, Chord]] = field(default_factory=list)  # (offset in sixteenths, chord)
+    harmonies: list[Harmony] = field(default_factory=list)
+    words: str = ""  # lyric text for a bar with no note to hang it on
 
 
 @dataclass
@@ -51,9 +55,10 @@ class Score:
     measures: list[Measure]
     key: Key
     beats_per_bar: int
-    bpm: float
+    bpm: float | None  # None = do not print a tempo mark
     title: str
     artist: str
+    subtitle: str
     n_staves: int
     clefs: list[str]
 
@@ -90,7 +95,7 @@ def split_duration(pos: int, length: int, bar: int, rest: bool = False) -> list[
     return out
 
 
-def _melody(notes: list[tuple[int, int, int, float]]) -> list[tuple[int, int, int, float]]:
+def melody(notes: list[tuple[int, int, int, float]]) -> list[tuple[int, int, int, float]]:
     """Skyline melody: the highest reasonably strong note at each onset."""
     by_onset: dict[int, list[tuple[int, int, int, float]]] = {}
     for note in notes:
@@ -113,7 +118,7 @@ def _melody(notes: list[tuple[int, int, int, float]]) -> list[tuple[int, int, in
     return kept
 
 
-def _voice(notes: list[tuple[int, int, int, float]], total: int, limit: int, keep: str) -> list[tuple[int, int, tuple[int, ...]]]:
+def voice(notes: list[tuple[int, int, int, float]], total: int, limit: int, keep: str) -> list[Event]:
     """Reduce overlapping notes to one rhythmic line of (start, length, pitches)."""
     groups: dict[int, dict[int, tuple[int, float]]] = {}
     for start, length, pitch, velocity in notes:
@@ -140,7 +145,7 @@ def _voice(notes: list[tuple[int, int, int, float]], total: int, limit: int, kee
     return events
 
 
-def _measures_for(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int, bar: int, cuts: list[set[int]]) -> list[list[Element]]:
+def lay_out(events: list[Event], n_bars: int, bar: int, cuts: list[set[int]]) -> list[list[Element]]:
     """Lay events out bar by bar, filling gaps with rests and tying across bar lines."""
     out: list[list[Element]] = [[] for _ in range(n_bars)]
 
@@ -185,52 +190,22 @@ def _measures_for(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int, b
     return out
 
 
-def build_score(analysis: Analysis, options: ScoreOptions | None = None) -> Score:
-    options = options or ScoreOptions()
-    grid = analysis.grid
-    key = analysis.key.transposed(options.transpose)
-    bar = grid.per_bar * DIVISIONS
-    n_bars = max(1, (len(grid.times) - 1) // grid.per_bar)
-    total = n_bars * bar
+def slashes(n_bars: int, beats_per_bar: int) -> list[list[Element]]:
+    """One rhythm slash per beat: the staff of a chord sheet."""
+    return [[Element(beat * DIVISIONS, DIVISIONS, slash=True) for beat in range(beats_per_bar)] for _ in range(n_bars)]
 
-    quantised: list[tuple[int, int, int, float]] = []
-    if analysis.notes:
-        starts = grid.position(np.array([n.start for n in analysis.notes])) * DIVISIONS
-        ends = grid.position(np.array([n.end for n in analysis.notes])) * DIVISIONS
-        for note, s, e in zip(analysis.notes, starts, ends):
-            pitch = note.pitch + options.transpose
-            start = int(round(s))
-            if not 21 <= pitch <= 108 or start >= total:
-                continue
-            start = max(0, start)
-            length = max(1, int(round(e)) - start)
-            quantised.append((start, min(length, total - start), pitch, note.velocity))
 
-    harmonies: list[list[tuple[int, Chord]]] = [[] for _ in range(n_bars)]
-    if options.include_chords:
-        previous = None
-        for event in analysis.chords:
-            if event.chord is None:
-                previous = None
-                continue
-            chord = event.chord.transposed(options.transpose)
-            position = int(round(event.beat * DIVISIONS))
-            if chord != previous and 0 <= position < total:
-                harmonies[position // bar].append((position % bar, chord))
-            previous = chord
-    cuts = [{offset for offset, _ in h} for h in harmonies]
-    no_cuts: list[set[int]] = [set() for _ in range(n_bars)]
-
-    limit = options.max_notes_per_chord
-    if options.arrangement == "lead":
-        line = _voice(_melody(quantised), total, 1, "top")
-        staves = [_measures_for(line, n_bars, bar, cuts)]
-        clefs = ["G"]
-    else:
-        upper = _voice([n for n in quantised if n[2] >= 60], total, limit, "top")
-        lower = _voice([n for n in quantised if n[2] < 60], total, limit, "bottom")
-        staves = [_measures_for(upper, n_bars, bar, cuts), _measures_for(lower, n_bars, bar, no_cuts)]
-        clefs = ["G", "F"]
-
-    measures = [Measure([staff[i] for staff in staves], harmonies[i]) for i in range(n_bars)]
-    return Score(measures, key, grid.per_bar, analysis.bpm, options.title, options.artist, len(staves), clefs)
+def underlay(elements: list[Element], text: str) -> bool:
+    """Spread a bar's lyric over the notes that start in it. False if there are none."""
+    words = text.split()
+    targets = [e for e in elements if (e.pitches or e.slash) and not e.tie_in]
+    if not words:
+        return True
+    if not targets:
+        return False
+    # Fill from the first note; whatever does not fit shares the last one.
+    for target, word in zip(targets, words):
+        target.lyric = word
+    if len(words) > len(targets):
+        targets[-1].lyric = " ".join(words[len(targets) - 1 :])
+    return True

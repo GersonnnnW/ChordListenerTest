@@ -40,6 +40,10 @@ class Settings:
     wait_seconds: int = field(default_factory=lambda: _int("CL_WAIT_SECONDS", 120))
     # Where the website may load artwork and preview audio from (the catalogue's CDN).
     media_origins: str = field(default_factory=lambda: os.environ.get("CL_MEDIA_ORIGINS", "https://*.apple.com https://*.mzstatic.com"))
+    # Show the reserved advertising spaces on the website, and which ad-network
+    # origins the page may load from (space separated) once they are filled.
+    ads: bool = field(default_factory=lambda: _bool("CL_ADS", False))
+    ad_origins: str = field(default_factory=lambda: os.environ.get("CL_AD_ORIGINS", ""))
 
     @property
     def db_path(self) -> str:

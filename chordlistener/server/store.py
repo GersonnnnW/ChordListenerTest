@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS usage (
     cached INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_key ON usage (key_id, created_at);
+CREATE TABLE IF NOT EXISTS scores (
+    transcription_id TEXT PRIMARY KEY,
+    document BLOB NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -77,6 +82,10 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        # Databases created before corrections could be saved lack this column.
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(transcriptions)")}
+        if "edit_hash" not in columns:
+            self._db.execute("ALTER TABLE transcriptions ADD COLUMN edit_hash TEXT")
 
     def _run(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -131,13 +140,15 @@ class Store:
 
     # ---- Transcriptions ---------------------------------------------------
 
-    def create_transcription(self, owner: str, meta: dict, options_key: str, engine_version: str) -> str:
+    def create_transcription(self, owner: str, meta: dict, options_key: str, engine_version: str) -> tuple[str, str]:
+        """Returns (id, edit token). The token lets its holder save corrections; only its hash is kept."""
         tid = "tr_" + secrets.token_urlsafe(16)
+        token = "et_" + secrets.token_urlsafe(24)
         self._run(
-            "INSERT INTO transcriptions (id, owner, status, created_at, options_key, engine_version, meta) VALUES (?,?,?,?,?,?,?)",
-            (tid, owner, "processing", time.time(), options_key, engine_version, json.dumps(meta)),
+            "INSERT INTO transcriptions (id, owner, status, created_at, options_key, engine_version, meta, edit_hash) VALUES (?,?,?,?,?,?,?,?)",
+            (tid, owner, "processing", time.time(), options_key, engine_version, json.dumps(meta), hash_key(token)),
         )
-        return tid
+        return tid, token
 
     def finish_transcription(self, tid: str, content_hash: str, cached: bool, meta: dict | None = None) -> None:
         if meta is not None:
@@ -156,6 +167,20 @@ class Store:
 
     def delete_transcription(self, tid: str) -> None:
         self._run("DELETE FROM transcriptions WHERE id = ?", (tid,))
+        self._run("DELETE FROM scores WHERE transcription_id = ?", (tid,))
+
+    # ---- Corrected scores -------------------------------------------------
+
+    def get_score(self, tid: str) -> dict | None:
+        rows = self._run("SELECT document FROM scores WHERE transcription_id = ?", (tid,))
+        return json.loads(zlib.decompress(rows[0]["document"])) if rows else None
+
+    def put_score(self, tid: str, document: dict) -> None:
+        blob = zlib.compress(json.dumps(document, separators=(",", ":")).encode("utf-8"), 6)
+        self._run("INSERT OR REPLACE INTO scores (transcription_id, document, updated_at) VALUES (?,?,?)", (tid, blob, time.time()))
+
+    def delete_score(self, tid: str) -> None:
+        self._run("DELETE FROM scores WHERE transcription_id = ?", (tid,))
 
     def fail_interrupted(self) -> None:
         """Jobs that were running when the server stopped cannot finish."""
@@ -164,6 +189,7 @@ class Store:
     def purge(self, older_than_days: int) -> None:
         cutoff = time.time() - older_than_days * 86400
         self._run("DELETE FROM transcriptions WHERE created_at < ?", (cutoff,))
+        self._run("DELETE FROM scores WHERE transcription_id NOT IN (SELECT id FROM transcriptions)")
         self._run(
             "DELETE FROM analyses WHERE created_at < ? AND content_hash NOT IN (SELECT content_hash FROM transcriptions WHERE content_hash IS NOT NULL)",
             (cutoff,),

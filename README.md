@@ -11,7 +11,7 @@ It ships as three things built on one engine:
 
 | | |
 |---|---|
-| **Website** | Search or upload, then follow the chords in time with the music, transpose, view and print the sheet music. |
+| **Website** | Search or upload, follow the chords in time with the music, correct mistakes, add lyrics, and download the sheet music as a PDF. |
 | **HTTP API** | Versioned REST API with API keys, rate limits, quotas and usage metering, for other businesses to integrate. |
 | **Python library / CLI** | `chordlistener analyze song.mp3` — the same engine with no server. |
 
@@ -69,6 +69,35 @@ docker build -t chordlistener .
 ```bash
 docker run -p 8000:8000 -v chordlistener-data:/data chordlistener
 ```
+
+## The website
+
+- **Chords** — one cell per bar, highlighted in time with the audio. Click a bar to jump there. Transpose up or down.
+- **Sheet music** — piano score or lead sheet, drawn in the browser.
+- **Show / hide** — switches for Notes, Chords, Lyrics, Key and BPM. With Notes off the sheet becomes a chord sheet (rhythm slashes with chord symbols and lyrics).
+- **Edit** — fix what the transcription got wrong:
+  - *Chords:* click any beat and type the chord (`F#m7`, `Bb/D`, `Csus4`, `N.C.` …). Empty removes it.
+  - *Notes:* on the sheet, click a note to raise or lower it, change its length, move it earlier or later, add notes to make a chord, or delete it; click a rest to add a note there. Arrow keys, `[` `]`, Delete and Ctrl+Z also work.
+  - *Lyrics:* type under each bar, or paste a whole verse and have it spread across bars.
+  - *Title, artist, key, BPM.*
+  - **Save** stores the corrected version; **Reset to original** brings back the automatic one. Undo and redo cover the last 60 changes.
+- **Download** — a PDF with a choice of what goes in it: the notes, chords, lyrics, key and tempo, each on or off, as a piano score or a lead sheet. MusicXML, MIDI, a text chord chart and JSON are also offered.
+
+Who can save: the browser that created a transcription holds a private edit token for it, so a link can be shared without others overwriting the work. Anyone opening the link can still edit their own copy on the page and download it.
+
+Lyrics are entered by people, not detected. There is no reliable way to transcribe sung words from a full mix at this speed and cost, and fetching lyrics from the internet would mean publishing copyrighted text without a licence.
+
+PDFs are produced in the visitor's browser, so they cost the server nothing.
+
+### Advertising spaces
+
+The page layout has three reserved ad positions — under the header, below a finished transcription, and above the footer — that take up no room until switched on:
+
+```bash
+CL_ADS=true chordlistener serve
+```
+
+With ads on, each position reserves banner-sized space (728×90, or 320×50 on phones) and shows a dashed placeholder until an ad fills it. Put your ad network's code in `chordlistener/server/web/ads.js` (the file explains how) and list the network's domains in `CL_AD_ORIGINS` so the page's security policy allows them. Ads never appear in embed mode or in downloaded sheet music.
 
 ## Using the API
 
@@ -140,6 +169,8 @@ All settings are environment variables.
 | `CL_MODEL_THREADS` | all cores | CPU threads the pitch model may use per analysis |
 | `CL_CATALOG` | `itunes` | Song lookup provider; `none` disables search by name |
 | `CL_CORS_ORIGINS` | `*` | Browser origins allowed to call the API |
+| `CL_ADS` | `false` | Show the reserved advertising spaces on the website |
+| `CL_AD_ORIGINS` | none | Ad-network domains the page may load scripts, frames and images from (space separated) |
 | `CL_MEDIA_ORIGINS` | Apple's CDN | Origins the website may load artwork and preview audio from; change it when you plug in your own catalogue |
 | `CL_TRUST_PROXY` | `false` | Read the client IP from `X-Forwarded-For` (set when behind a reverse proxy) |
 | `CL_RETENTION_DAYS` | `30` | Days results are kept; `0` keeps them forever |
@@ -159,7 +190,7 @@ On a dozen real commercial recordings checked by hand against their known chords
 - **Chord colour is conservative.** Sevenths and suspended chords are only reported when clearly present, so some real 7ths come back as plain triads. `vocabulary=full` loosens this; `vocabulary=basic` forces major/minor only.
 - **Tempo can come out at half or double** the speed a musician would count (70 vs 140 bpm). The chords and timings are unaffected; the bar lengths and note values in the sheet music are. The website has ½× / 2× buttons and the API a `tempo` option to flip it.
 - **Dense or unusual material is harder**: heavily distorted guitars, songs built on drones or fast arpeggios, 6/8 and other meters beyond 3/4 and 4/4, rap, and anything without stable pitched instruments.
-- **Sheet music is a faithful sketch, not an engraver's edition.** The piano score writes down every detected note split across two staves; the lead sheet picks the top line as melody. Both will need tidying by a musician before publication.
+- **Sheet music is a faithful sketch, not an engraver's edition.** The piano score writes down every detected note split across two staves; the lead sheet picks the top line as melody. Both usually need tidying, which is what the website's Edit mode is for.
 
 ## Before you sell it: licences and rights
 
@@ -190,7 +221,8 @@ chordlistener/
   chords.py     beat-synchronous chroma, chord templates, Viterbi decoding, key
   theory.py     note spelling, key signatures, chord vocabulary
   pipeline.py   ties the stages together; the Analysis result type
-  score.py      quantisation into bars, voices, ties and rests
+  document.py   the editable score: built from an analysis, validated, corrected by people, laid out
+  score.py      notation building blocks: bars, voices, ties, rests, lyric underlay
   musicxml.py   MusicXML writer
   midi.py       MIDI writer
   export.py     MusicXML / MIDI / chord chart from an Analysis

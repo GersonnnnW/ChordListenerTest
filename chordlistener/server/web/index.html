@@ -17,10 +17,13 @@
     <nav><a href="/docs">API</a></nav>
   </header>
 
+  <!-- Advertising spaces. Hidden unless the server runs with CL_ADS=true; see ads.js. -->
+  <aside class="ad-slot ad-wide" data-ad-slot="top" aria-label="Advertisement"></aside>
+
   <main>
     <section id="start" class="start">
       <h1>Chords and sheet music from any song</h1>
-      <p class="lede">Search for a song or drop in an audio file. You get the chords, the key and tempo, and playable sheet music in a few seconds.</p>
+      <p class="lede">Search for a song or drop in an audio file. You get the chords, the key and tempo, and sheet music you can correct and download.</p>
 
       <div class="inputs">
         <div class="panel" id="search-panel">
@@ -58,14 +61,14 @@
           <h2 id="song-title"></h2>
           <p id="song-artist"></p>
         </div>
-        <button type="button" id="again" class="ghost">New song</button>
+        <button type="button" id="again" class="btn">New song</button>
       </div>
 
       <p id="clip-note" class="note" hidden>This is the 30-second preview of the song. To transcribe all of it, upload the full audio file.</p>
 
       <dl class="facts">
-        <div><dt>Key</dt><dd id="fact-key"></dd></div>
-        <div class="stepper">
+        <div id="chip-key"><dt>Key</dt><dd id="fact-key"></dd></div>
+        <div id="chip-tempo" class="stepper">
           <dt>Tempo</dt>
           <dd>
             <span id="fact-tempo"></span>
@@ -100,6 +103,42 @@
         <audio id="audio" preload="auto"></audio>
       </div>
 
+      <div class="toolbar">
+        <div class="toggles" role="group" aria-label="Show">
+          <span class="toolbar-label">Show</span>
+          <button type="button" class="toggle" data-show="notes" aria-pressed="true">Notes</button>
+          <button type="button" class="toggle" data-show="chords" aria-pressed="true">Chords</button>
+          <button type="button" class="toggle" data-show="lyrics" aria-pressed="true">Lyrics</button>
+          <button type="button" class="toggle" data-show="key" aria-pressed="true">Key</button>
+          <button type="button" class="toggle" data-show="tempo" aria-pressed="true">BPM</button>
+        </div>
+        <div class="actions">
+          <button type="button" id="edit" class="btn">Edit</button>
+          <button type="button" id="download" class="btn primary">Download</button>
+        </div>
+      </div>
+
+      <div id="editbar" class="editbar" hidden>
+        <div class="editbar-row">
+          <strong>Editing</strong>
+          <span id="edit-status" class="edit-status"></span>
+          <span class="spacer"></span>
+          <button type="button" id="undo" class="btn small" disabled>Undo</button>
+          <button type="button" id="redo" class="btn small" disabled>Redo</button>
+          <button type="button" id="revert" class="btn small">Reset to original</button>
+          <button type="button" id="save" class="btn small primary" disabled>Save</button>
+          <button type="button" id="done" class="btn small">Done</button>
+        </div>
+        <div class="editbar-row fields">
+          <label>Title <input id="ed-title" type="text" maxlength="200"></label>
+          <label>Artist <input id="ed-artist" type="text" maxlength="200"></label>
+          <label>Key <select id="ed-key"></select></label>
+          <label>BPM <input id="ed-bpm" type="number" min="20" max="400" step="1"></label>
+          <button type="button" id="paste-lyrics" class="btn small">Paste lyrics…</button>
+        </div>
+        <p class="hint" id="edit-hint">Chords tab: click a beat to change its chord, and type lyrics under each bar. Sheet music tab: click a note or rest to change it.</p>
+      </div>
+
       <div class="tabs" role="tablist">
         <button type="button" role="tab" id="tab-chords" aria-selected="true" aria-controls="view-chords">Chords</button>
         <button type="button" role="tab" id="tab-sheet" aria-selected="false" aria-controls="view-sheet">Sheet music</button>
@@ -115,27 +154,75 @@
             <button type="button" data-arrangement="piano" aria-pressed="true">Piano</button>
             <button type="button" data-arrangement="lead" aria-pressed="false">Lead sheet</button>
           </div>
-          <button type="button" id="print" class="ghost">Print / save as PDF</button>
+          <span id="sheet-status" class="hint"></span>
         </div>
-        <p id="sheet-status" class="hint"></p>
+        <div id="inspector" class="inspector" hidden></div>
         <div id="sheet" class="sheet"></div>
       </div>
 
-      <div class="downloads">
-        <span>Download</span>
-        <a id="dl-xml" href="#">Sheet music (MusicXML)</a>
-        <a id="dl-midi" href="#">MIDI</a>
-        <a id="dl-chart" href="#">Chord chart</a>
-        <a id="dl-json" href="#">JSON</a>
-      </div>
-      <p class="hint disclaimer">Transcriptions are produced automatically and can contain mistakes, especially on dense mixes. Check them by ear before you rely on them.</p>
+      <aside class="ad-slot ad-wide" data-ad-slot="result" aria-label="Advertisement"></aside>
+
+      <p class="hint disclaimer">Transcriptions are produced automatically and can contain mistakes, especially on dense mixes. Use Edit to correct them.</p>
     </section>
   </main>
+
+  <aside class="ad-slot ad-wide" data-ad-slot="bottom" aria-label="Advertisement"></aside>
 
   <footer class="footer">
     <span>Audio is analysed and then discarded; only the transcription is kept.</span>
   </footer>
 
+  <dialog id="download-dialog" class="dialog">
+    <form method="dialog">
+      <h3>Download</h3>
+      <fieldset>
+        <legend>Include</legend>
+        <label><input type="checkbox" id="dl-notes" checked> Sheet music (the notes)</label>
+        <label><input type="checkbox" id="dl-chords" checked> Chords</label>
+        <label><input type="checkbox" id="dl-lyrics"> Lyrics <span class="hint" id="dl-lyrics-hint"></span></label>
+        <label><input type="checkbox" id="dl-key" checked> Key</label>
+        <label><input type="checkbox" id="dl-tempo" checked> Tempo (BPM)</label>
+      </fieldset>
+      <fieldset id="dl-layout">
+        <legend>Layout</legend>
+        <label><input type="radio" name="dl-arrangement" value="piano" checked> Piano (two staves)</label>
+        <label><input type="radio" name="dl-arrangement" value="lead"> Lead sheet (melody line)</label>
+      </fieldset>
+      <p class="error" id="dl-error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="dl-pdf" class="btn primary">Download PDF</button>
+        <button type="submit" class="btn">Close</button>
+      </div>
+      <p class="hint more">Other formats:
+        <button type="button" class="link" id="dl-xml">MusicXML</button> ·
+        <button type="button" class="link" id="dl-chart">chord chart (text)</button> ·
+        <a id="dl-midi" href="#">MIDI</a> ·
+        <a id="dl-json" href="#" target="_blank" rel="noopener">JSON</a>
+      </p>
+    </form>
+  </dialog>
+
+  <dialog id="lyrics-dialog" class="dialog">
+    <form method="dialog">
+      <h3>Paste lyrics</h3>
+      <p class="hint">One line of the song per row. Each line is spread over the bars you choose; fine-tune afterwards under each bar.</p>
+      <textarea id="ly-text" rows="9" placeholder="When I find myself in times of trouble&#10;Mother Mary comes to me"></textarea>
+      <div class="dialog-fields">
+        <label>Start at bar <input id="ly-start" type="number" min="1" value="1"></label>
+        <label>Bars per line
+          <select id="ly-span"><option>1</option><option selected>2</option><option>4</option></select>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="ly-apply" class="btn primary">Add lyrics</button>
+        <button type="submit" class="btn">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="pdf-stage" class="pdf-stage" aria-hidden="true"></div>
+
   <script src="/static/app.js" defer></script>
+  <!-- ads-script -->
 </body>
 </html>

@@ -188,3 +188,99 @@ def test_async_mode_can_be_polled(client, wav_path):
             break
         time.sleep(0.1)
     assert body["status"] == "completed"
+
+
+# ---- Editable scores -------------------------------------------------------
+
+
+def created(client, wav_path, **kwargs):
+    body = upload(client, wav_path, **kwargs).json()
+    return body["id"], {"X-Edit-Token": body["edit_token"]} if "edit_token" in body else {}
+
+
+def test_score_can_be_corrected_saved_and_reverted(client, wav_path):
+    tid, token = created(client, wav_path, data={"title": "My Song"})
+    score = client.get(f"/v1/transcriptions/{tid}/score", headers=token).json()
+    assert score["edited"] is False and score["can_save"] is True
+    assert score["view"]["chords"][0]["chord"] == "C"
+    assert client.get(f"/v1/transcriptions/{tid}/score").json()["can_save"] is False  # no token: view only
+
+    doc = score["document"]
+    doc["chords"][0][1] = "Cmaj7"
+    doc["lyrics"] = {"0": "Hello there"}
+    doc["title"] = "Corrected"
+    saved = client.put(f"/v1/transcriptions/{tid}/score", json=doc, headers=token)
+    assert saved.status_code == 200 and saved.json()["edited"] is True
+
+    again = client.get(f"/v1/transcriptions/{tid}/score").json()
+    assert again["edited"] is True and again["document"]["title"] == "Corrected"
+    xml = client.get(f"/v1/transcriptions/{tid}/musicxml").text
+    assert "major-seventh" in xml and "<text>Hello</text>" in xml and "Corrected" in xml
+    assert "<text>Hello</text>" not in client.get(f"/v1/transcriptions/{tid}/musicxml", params={"lyrics": "false"}).text
+    assert "major-seventh" not in client.get(f"/v1/transcriptions/{tid}/musicxml", params={"original": "true"}).text
+    chart = client.get(f"/v1/transcriptions/{tid}/chart").text
+    assert "| Cmaj7" in chart and "Hello there" in chart
+
+    assert client.delete(f"/v1/transcriptions/{tid}/score").status_code == 403
+    assert client.delete(f"/v1/transcriptions/{tid}/score", headers=token).status_code == 204
+    assert client.get(f"/v1/transcriptions/{tid}/score").json()["edited"] is False
+
+
+def test_only_the_creator_can_save(client, wav_path):
+    tid, token = created(client, wav_path)
+    doc = client.get(f"/v1/transcriptions/{tid}/score").json()["document"]
+    assert client.put(f"/v1/transcriptions/{tid}/score", json=doc).status_code == 403
+    assert client.put(f"/v1/transcriptions/{tid}/score", json=doc, headers={"X-Edit-Token": "et_guess"}).status_code == 403
+    assert client.put(f"/v1/transcriptions/{tid}/score", json=doc, headers=token).status_code == 200
+
+    _, alice = client.store.create_key("Alice Ltd")
+    _, bob = client.store.create_key("Bob GmbH")
+    body = upload(client, wav_path, headers={"X-API-Key": alice}).json()
+    assert "edit_token" not in body  # the API key is the credential
+    keyed = body["id"]
+    assert client.put(f"/v1/transcriptions/{keyed}/score", json=doc, headers={"X-API-Key": alice}).status_code == 200
+    assert client.put(f"/v1/transcriptions/{keyed}/score", json=doc, headers={"X-API-Key": bob}).status_code == 404
+
+
+def test_saving_rejects_broken_scores(client, wav_path):
+    tid, token = created(client, wav_path)
+    doc = client.get(f"/v1/transcriptions/{tid}/score").json()["document"]
+    doc["arrangements"]["lead"][0].append([0, 1, [300]])
+    refused = client.put(f"/v1/transcriptions/{tid}/score", json=doc, headers=token)
+    assert refused.status_code == 400 and "pitch" in refused.json()["error"]["message"].lower()
+    assert client.put(f"/v1/transcriptions/{tid}/score", content=b"{not json", headers={**token, "Content-Type": "application/json"}).status_code == 400
+    assert client.get(f"/v1/transcriptions/{tid}/score").json()["edited"] is False
+
+
+def test_render_without_saving(client, wav_path):
+    tid, _ = created(client, wav_path)
+    doc = client.get(f"/v1/transcriptions/{tid}/score").json()["document"]
+    doc["lyrics"] = {"1": "unsaved words"}
+    out = client.post("/v1/score/render", json={"document": doc, "arrangement": "lead", "transpose": 2, "chart": True, "show": {"tempo": False}}).json()
+    assert out["view"]["key"]["name"] == "D major" and out["view"]["has_lyrics"] is True
+    assert "<text>unsaved</text>" in out["musicxml"] and "<metronome>" not in out["musicxml"] and "<staves>" not in out["musicxml"]
+    assert "unsaved words" in out["chart"]
+    assert "musicxml" not in client.post("/v1/score/render", json={"document": doc, "musicxml": False}).json()
+    assert client.get(f"/v1/transcriptions/{tid}/score").json()["document"]["lyrics"] == {}  # nothing was stored
+    for bad in ({"document": {}}, {"document": doc, "arrangement": "band"}, {"document": doc, "transpose": 40}, []):
+        assert client.post("/v1/score/render", json=bad).status_code == 400
+
+
+def test_chord_sheet_and_plain_options(client, wav_path):
+    tid, _ = created(client, wav_path)
+    sheet = client.get(f"/v1/transcriptions/{tid}/musicxml", params={"notes": "false", "key": "false", "tempo": "false"}).text
+    assert "<notehead>slash</notehead>" in sheet and "<movement-title>" not in sheet
+    plain = client.get(f"/v1/transcriptions/{tid}/musicxml", params={"chords": "false"}).text
+    assert "<harmony" not in plain and "Key: C major" in plain
+
+
+def test_ad_spaces_are_off_unless_enabled(tmp_path, wav_path):
+    with make_client(tmp_path, wav_path) as client:
+        page = client.get("/")
+        assert 'class="ads-on"' not in page.text and "/static/ads.js" not in page.text
+        assert "frame-src 'none'" in page.headers["content-security-policy"]
+    with make_client(tmp_path / "b", wav_path, ads=True, ad_origins="https://ads.example") as client:
+        page = client.get("/")
+        assert 'class="ads-on"' in page.text and "/static/ads.js" in page.text
+        assert "frame-src https://ads.example" in page.headers["content-security-policy"]
+        assert client.get("/static/ads.js").status_code == 200

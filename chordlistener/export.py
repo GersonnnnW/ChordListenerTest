@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from . import document
+from .document import ScoreOptions, ShowOptions, build_score
 from .midi import MidiTrack, write_midi
 from .musicxml import to_musicxml
 from .pipeline import Analysis
-from .score import ScoreOptions, build_score
 
 
 def musicxml(analysis: Analysis, options: ScoreOptions | None = None) -> str:
     return to_musicxml(build_score(analysis, options))
+
+
+def musicxml_from_document(doc: dict, arrangement: str = "piano", transpose: int = 0, show: ShowOptions | None = None) -> str:
+    """Sheet music for a (validated) score document, including any corrections people made."""
+    return to_musicxml(document.score_from_document(doc, arrangement, transpose, show))
 
 
 def midi(analysis: Analysis, transpose: int = 0) -> bytes:
@@ -27,31 +33,5 @@ def midi(analysis: Analysis, transpose: int = 0) -> bytes:
 
 def chord_chart(analysis: Analysis, transpose: int = 0, title: str = "", artist: str = "", bars_per_line: int = 4) -> str:
     """Plain-text chord chart, one cell per bar."""
-    key = analysis.key.transposed(transpose)
-    grid = analysis.grid
-    per_bar = grid.per_bar
-    n_bars = max(1, (len(grid.times) - 1) // per_bar)
-    slots: list[list[str]] = [["."] * per_bar for _ in range(n_bars)]
-    carried = ""
-    starts: dict[int, str] = {}
-    for event in analysis.chords:
-        starts[int(round(event.beat))] = event.chord.transposed(transpose).symbol(key) if event.chord else "N.C."
-    cells = []
-    for index in range(n_bars):
-        for beat in range(per_bar):
-            if index * per_bar + beat in starts:
-                slots[index][beat] = starts[index * per_bar + beat]
-        tokens = slots[index]
-        if tokens[0] == ".":
-            tokens[0] = carried or "N.C."
-        changes = [t for t in tokens if t != "."]
-        carried = changes[-1]
-        cells.append(tokens[0] if len(changes) == 1 else " ".join(tokens))
-    width = max(len(c) for c in cells)
-    header = [f"{title}" + (f" - {artist}" if artist else "")] if title else []
-    header.append(f"Key: {key.name} | Tempo: {analysis.bpm:.0f} bpm | Time: {per_bar}/4")
-    lines = header + [""]
-    for i in range(0, n_bars, bars_per_line):
-        row = cells[i : i + bars_per_line]
-        lines.append("| " + " | ".join(c.ljust(width) for c in row) + " |")
-    return "\n".join(lines) + "\n"
+    doc = document.document_from_analysis(analysis, title, artist)
+    return document.chord_chart(doc, transpose, bars_per_line)

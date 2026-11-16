@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -23,22 +24,24 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import ENGINE_VERSION, __version__, export
 from ..audio import AudioError
 from ..pipeline import Analysis, AnalysisOptions, analyze
-from ..score import ScoreOptions
+from ..document import ARRANGEMENTS, DocumentError, ShowOptions, document_from_analysis, document_view, normalize_document
+from ..document import chord_chart as document_chart
 from ..theory import VOCABULARIES
 from .catalog import CatalogError, CatalogProvider, Track, make_provider
 from .config import Settings
-from .store import Store
+from .store import Store, hash_key
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 PUBLIC = "public"
 TEMPO_SCALES = {"auto": 1.0, "half": 0.5, "double": 2.0}
+MAX_SCORE_BYTES = 4 * 1024 * 1024
 
 
 class RateLimiter:
@@ -217,8 +220,38 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         elif row["status"] == "completed":
             body["result"] = load(row).to_dict(transpose=transpose, include_notes=notes)
             base = f"/v1/transcriptions/{row['id']}"
-            body["links"] = {"self": base, "musicxml": base + "/musicxml", "midi": base + "/midi", "chart": base + "/chart"}
+            body["links"] = {"self": base, "score": base + "/score", "musicxml": base + "/musicxml", "midi": base + "/midi", "chart": base + "/chart"}
         return body
+
+    # ---- The editable score -----------------------------------------------
+
+    def current_document(row, original: bool = False) -> tuple[dict, bool]:
+        """The score as it stands: the saved corrections if there are any, else fresh from the analysis."""
+        saved = None if original else store.get_score(row["id"])
+        if saved is not None:
+            return saved, True
+        meta = json.loads(row["meta"])
+        return normalize_document(document_from_analysis(load(row), _title(meta)[:200], meta.get("artist", "")[:200])), False
+
+    def may_save(row, who: Caller, request: Request) -> bool:
+        if row["owner"] != PUBLIC:
+            return True  # `owned` has already checked the API key
+        # Anyone with the link can view a keyless transcription, but only the
+        # browser that created it holds the token to change it.
+        token = request.headers.get("x-edit-token", "")
+        return bool(token) and bool(row["edit_hash"]) and secrets.compare_digest(hash_key(token), row["edit_hash"])
+
+    async def read_json(request: Request) -> dict:
+        body = await request.body()
+        if len(body) > MAX_SCORE_BYTES:
+            raise HTTPException(413, "The score is too large")
+        try:
+            return json.loads(body)
+        except ValueError as exc:
+            raise HTTPException(400, "The request body is not valid JSON") from exc
+
+    def show_options(notes: bool, chords: bool, lyrics: bool, tempo: bool, key: bool) -> ShowOptions:
+        return ShowOptions(notes=notes, chords=chords, lyrics=lyrics, tempo=tempo, key=key)
 
     # ---- Running an analysis ----------------------------------------------
 
@@ -260,7 +293,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
                     pass
 
     async def start(who: Caller, path: str | None, content_hash: str, options: AnalysisOptions, meta: dict, wait: bool, transpose: int = 0) -> Response:
-        tid = store.create_transcription(who.owner, meta, options.cache_key(), ENGINE_VERSION)
+        tid, edit_token = store.create_transcription(who.owner, meta, options.cache_key(), ENGINE_VERSION)
         task = asyncio.create_task(process(tid, who, path, content_hash, options, meta))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
@@ -271,7 +304,10 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
                 pass
         row = store.get_transcription(tid)
         status = {"completed": 200, "processing": 202, "failed": 422}[row["status"]]
-        return JSONResponse(describe(row, transpose), status_code=status)
+        body = describe(row, transpose)
+        if who.is_public:
+            body["edit_token"] = edit_token  # shown once; needed to save corrections without an API key
+        return JSONResponse(body, status_code=status)
 
     def parse_options(vocabulary: str, beats_per_bar: int | None, tempo: str) -> AnalysisOptions:
         if vocabulary not in VOCABULARIES:
@@ -350,12 +386,18 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         who: Caller = Depends(caller),
         arrangement: str = Query("piano", pattern="^(piano|lead)$", description="piano = two staves with all notes; lead = melody line with chord symbols"),
         transpose: int = Query(0, ge=-11, le=11),
+        notes: bool = Query(True, description="false = chord sheet: rhythm slashes instead of notes"),
+        chords: bool = Query(True, description="Print chord symbols"),
+        lyrics: bool = Query(True, description="Print lyrics, if any have been added"),
+        tempo: bool = Query(True, description="Print the tempo"),
+        key: bool = Query(True, description="Print the key as text (the key signature is always there)"),
+        original: bool = Query(False, description="Ignore saved corrections"),
         download: bool = False,
     ):
         row = owned(tid, who)
-        meta = json.loads(row["meta"])
-        xml = export.musicxml(load(row), ScoreOptions(arrangement=arrangement, transpose=transpose, title=_title(meta), artist=meta.get("artist", "")))
-        return Response(xml, media_type="application/vnd.recordare.musicxml+xml", headers=_attachment(meta, f"{arrangement}.musicxml", download))
+        doc, _ = current_document(row, original)
+        xml = export.musicxml_from_document(doc, arrangement, transpose, show_options(notes, chords, lyrics, tempo, key))
+        return Response(xml, media_type="application/vnd.recordare.musicxml+xml", headers=_attachment(json.loads(row["meta"]), f"{arrangement}.musicxml", download))
 
     @app.get("/v1/transcriptions/{tid}/midi", tags=["Transcriptions"], summary="Detected notes as a MIDI file")
     async def get_midi(tid: str, who: Caller = Depends(caller), transpose: int = Query(0, ge=-11, le=11)):
@@ -363,11 +405,75 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         return Response(export.midi(load(row), transpose), media_type="audio/midi", headers=_attachment(json.loads(row["meta"]), "mid", True))
 
     @app.get("/v1/transcriptions/{tid}/chart", tags=["Transcriptions"], summary="Plain-text chord chart")
-    async def get_chart(tid: str, who: Caller = Depends(caller), transpose: int = Query(0, ge=-11, le=11), download: bool = False):
+    async def get_chart(
+        tid: str,
+        who: Caller = Depends(caller),
+        transpose: int = Query(0, ge=-11, le=11),
+        chords: bool = True,
+        lyrics: bool = True,
+        tempo: bool = True,
+        key: bool = True,
+        original: bool = Query(False, description="Ignore saved corrections"),
+        download: bool = False,
+    ):
         row = owned(tid, who)
-        meta = json.loads(row["meta"])
-        text = export.chord_chart(load(row), transpose, _title(meta), meta.get("artist", ""))
-        return PlainTextResponse(text, headers=_attachment(meta, "chords.txt", download))
+        doc, _ = current_document(row, original)
+        text = document_chart(doc, transpose, show=show_options(True, chords, lyrics, tempo, key))
+        return PlainTextResponse(text, headers=_attachment(json.loads(row["meta"]), "chords.txt", download))
+
+    @app.get("/v1/transcriptions/{tid}/score", tags=["Scores"], summary="The editable score")
+    async def get_score(tid: str, request: Request, who: Caller = Depends(caller), transpose: int = Query(0, ge=-11, le=11), original: bool = False):
+        row = owned(tid, who)
+        doc, edited = current_document(row, original)
+        return {"document": doc, "edited": edited, "can_save": may_save(row, who, request), "view": document_view(doc, transpose)}
+
+    @app.put("/v1/transcriptions/{tid}/score", tags=["Scores"], summary="Save a corrected score")
+    async def put_score(tid: str, request: Request, who: Caller = Depends(caller)):
+        row = owned(tid, who)
+        load(row)  # only finished transcriptions have a score
+        if not may_save(row, who, request):
+            raise HTTPException(403, "Only the person who created this transcription can save changes to it")
+        try:
+            doc = normalize_document(await read_json(request))
+        except DocumentError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        store.put_score(row["id"], doc)
+        return {"document": doc, "edited": True, "can_save": True, "view": document_view(doc)}
+
+    @app.delete("/v1/transcriptions/{tid}/score", status_code=204, tags=["Scores"], summary="Discard corrections and go back to the automatic transcription")
+    async def delete_score(tid: str, request: Request, who: Caller = Depends(caller)):
+        row = owned(tid, who)
+        if not may_save(row, who, request):
+            raise HTTPException(403, "Only the person who created this transcription can change it")
+        store.delete_score(row["id"])
+        return Response(status_code=204)
+
+    @app.post("/v1/score/render", tags=["Scores"], summary="Render a score document without saving it")
+    async def render_score(request: Request, who: Caller = Depends(caller)):
+        """Body: {"document": {...}, "arrangement": "piano", "transpose": 0, "musicxml": true, "chart": false,
+        "show": {"notes": true, "chords": true, "lyrics": true, "tempo": true, "key": true}}"""
+        ok, retry = limiter.allow(("render:ip:" + who.ip) if who.is_public else ("render:key:" + who.owner), 600, 60)
+        if not ok:
+            raise HTTPException(429, "Too many requests. Please slow down.", headers={"Retry-After": str(retry)})
+        body = await read_json(request)
+        if not isinstance(body, dict):
+            raise HTTPException(400, "The request body must be a JSON object")
+        arrangement = body.get("arrangement", "piano")
+        transpose = body.get("transpose", 0)
+        flags = body.get("show") or {}
+        if arrangement not in ARRANGEMENTS or isinstance(transpose, bool) or not isinstance(transpose, int) or not -11 <= transpose <= 11 or not isinstance(flags, dict):
+            raise HTTPException(400, "Invalid arrangement, transpose or show options")
+        show = ShowOptions(**{name: flags.get(name, True) is not False for name in ("notes", "chords", "lyrics", "tempo", "key")})
+        try:
+            doc = normalize_document(body.get("document"))
+            out = {"document": doc, "view": document_view(doc, transpose)}
+            if body.get("musicxml", True):
+                out["musicxml"] = export.musicxml_from_document(doc, arrangement, transpose, show)
+            if body.get("chart"):
+                out["chart"] = document_chart(doc, transpose, show=show)
+        except DocumentError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return out
 
     @app.delete("/v1/transcriptions/{tid}", status_code=204, tags=["Transcriptions"], summary="Delete a transcription")
     async def delete_transcription(tid: str, who: Caller = Depends(caller)):
@@ -395,21 +501,27 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
 
     # ---- Website ----------------------------------------------------------
 
+    # Ad networks need their own script, frame and image origins; none are allowed unless ads are switched on.
+    ads = settings.ad_origins if settings.ads else ""
     page_headers = {
         "Cache-Control": "no-cache",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
         # Scripts only from this server; artwork and preview audio only from the catalogue's CDN.
         "Content-Security-Policy": (
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
-            f"img-src 'self' data: {settings.media_origins}; media-src 'self' blob: {settings.media_origins}; "
-            "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+            f"default-src 'self'; script-src 'self' {ads}; style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
+            f"img-src 'self' data: {settings.media_origins} {ads}; media-src 'self' blob: {settings.media_origins}; "
+            f"connect-src 'self' {ads}; frame-src {ads or "'none'"}; object-src 'none'; base-uri 'none'; form-action 'none'"
         ),
     }
+    with open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8") as fh:
+        page = fh.read()
+    if settings.ads:
+        page = page.replace('<html lang="en">', '<html lang="en" class="ads-on">').replace("<!-- ads-script -->", '<script src="/static/ads.js" defer></script>')
 
     @app.get("/", include_in_schema=False)
     async def index():
-        return FileResponse(os.path.join(WEB_DIR, "index.html"), headers=page_headers)
+        return HTMLResponse(page, headers=page_headers)
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
     return app

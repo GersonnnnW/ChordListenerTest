@@ -18,6 +18,16 @@ The note-decoding routine in `chordlistener/pitch.py` is a re-implementation of 
 `chordlistener/server/web/vendor/opensheetmusicdisplay.min.js` (version 2.3.1), from <https://github.com/opensheetmusicdisplay/opensheetmusicdisplay>. It embeds VexFlow (MIT).
 Copyright 2019 PhonicScore. Licence text: `chordlistener/server/web/vendor/LICENSE-opensheetmusicdisplay.txt`.
 
+### jsPDF — MIT
+
+`chordlistener/server/web/vendor/jspdf.umd.min.js` (version 4.2.1), from <https://github.com/parallax/jsPDF>.
+Copyright (c) 2010-2025 James Hall, (c) 2015-2025 yWorks GmbH. Licence text: `chordlistener/server/web/vendor/LICENSE-jspdf.txt`.
+
+### svg2pdf.js — MIT
+
+`chordlistener/server/web/vendor/svg2pdf.umd.min.js` (version 2.9.0), from <https://github.com/yWorks/svg2pdf.js>.
+Copyright (c) 2015-2026 yWorks GmbH, (c) 2013-2015 Vitaly Puzrin. Licence text: `chordlistener/server/web/vendor/LICENSE-svg2pdf.txt`.
+
 ## Installed as dependencies
 
 | Package | Licence |
