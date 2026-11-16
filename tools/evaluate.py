@@ -107,6 +107,7 @@ def evaluate(use_fluidsynth: bool, verbose: bool = False) -> list[dict]:
                     notes=note_f1(song, result),
                     beats=beat_f1(song, result),
                     tempo_ok=abs(ratio - 1) < 0.04,
+                    tempo_octave=abs(ratio - 0.5) < 0.02 or abs(ratio - 2) < 0.08,
                     tempo=f"{result.bpm:.0f}/{song.bpm:.0f}",
                     meter_ok=result.grid.per_bar == song.beats_per_bar,
                     key_ok=(result.key.tonic, result.key.minor) == (song.key_tonic, song.key_minor),
@@ -131,11 +132,12 @@ def main() -> None:
     for r in rows:
         print(
             f"{r['name']:<18}{r['root']:>6.0%}{r['exact']:>7.0%}{r['notes']:>7.2f}{r['beats']:>7.2f}  "
-            f"{r['tempo'] + ('' if r['tempo_ok'] else '!'):<9}{'ok' if r['meter_ok'] else 'WRONG':<6}"
+            f"{r['tempo'] + ('' if r['tempo_ok'] else ('*' if r['tempo_octave'] else '!')):<9}{'ok' if r['meter_ok'] else 'WRONG':<6}"
             f"{r['key'] + ('' if r['key_ok'] else ' !'):<14}{r['speed']:>6.0f}x"
         )
     mean = lambda k: float(np.mean([r[k] for r in rows]))  # noqa: E731
-    print(f"\n{'mean':<18}{mean('root'):>6.0%}{mean('exact'):>7.0%}{mean('notes'):>7.2f}{mean('beats'):>7.2f}  speed {mean('speed'):.0f}x real time")
+    print("\n* = counted at half or double the written tempo (same music, different beat level)")
+    print(f"{'mean':<18}{mean('root'):>6.0%}{mean('exact'):>7.0%}{mean('notes'):>7.2f}{mean('beats'):>7.2f}  speed {mean('speed'):.0f}x real time")
 
 
 if __name__ == "__main__":

@@ -123,6 +123,7 @@ def decode_notes(
     frame_threshold: float = 0.3,
     min_note_seconds: float = 0.11,
     energy_tolerance: int = 11,
+    min_amplitude: float = 0.35,
 ) -> list[Note]:
     frames = act.frames
     n_frames = frames.shape[0]
@@ -181,4 +182,5 @@ def decode_notes(
             events.append((begin, end, f, float(frames[begin:end, f].mean())))
 
     events.sort()
-    return [Note(t0 / FPS, t1 / FPS, f + MIDI_OFFSET, min(1.0, amp)) for t0, t1, f, amp in events]
+    # Faint detections are mostly drum hits and overtones mistaken for notes.
+    return [Note(t0 / FPS, t1 / FPS, f + MIDI_OFFSET, min(1.0, amp)) for t0, t1, f, amp in events if amp >= min_amplitude]

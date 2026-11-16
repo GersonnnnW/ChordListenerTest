@@ -49,7 +49,7 @@ def onset_envelope(samples: np.ndarray, pitch_onsets: np.ndarray | None = None) 
     return (flux / std if std > 0 else flux).astype(np.float64)
 
 
-def estimate_tempo(env: np.ndarray, min_bpm: float = 50.0, max_bpm: float = 220.0) -> float:
+def estimate_tempo(env: np.ndarray, min_bpm: float = 45.0, max_bpm: float = 220.0) -> float:
     """Global tempo from the autocorrelation of the onset envelope."""
     if len(env) < int(FPS * 2):
         return 120.0
@@ -69,7 +69,11 @@ def estimate_tempo(env: np.ndarray, min_bpm: float = 50.0, max_bpm: float = 220.
     # A real beat period also shows up at its multiples.
     score = at(cand) + 0.5 * at(cand * 2) + 0.25 * at(cand * 3) + 0.25 * at(cand * 4)
     bpm = 60 * FPS / cand
-    score = score * np.exp(-0.5 * (np.log2(bpm / 115.0) / 0.9) ** 2)
+    # The pulse is equally periodic at half and double speed, so which level
+    # counts as "the beat" comes down to this preference. Centred where it
+    # resolved the most real recordings correctly (slow songs otherwise read
+    # at double tempo).
+    score = score * np.exp(-0.5 * (np.log2(bpm / 95.0) / 0.9) ** 2)
     return float(bpm[int(score.argmax())])
 
 

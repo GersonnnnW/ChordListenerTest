@@ -86,7 +86,7 @@ def estimate_key(chroma: np.ndarray, spans: "list[ChordSpan] | None" = None) -> 
 # Plain triads are the safe reading; richer chords have to earn their place.
 # maj7 is penalised most because it is exactly "two neighbouring triads blurred
 # together" (Gmaj7 = G + Bm), the commonest way to miss a quick change.
-_BIAS = {"maj": 0.0, "min": 0.0, "7": -0.03, "min7": -0.03, "maj7": -0.05, "sus4": -0.045, "sus2": -0.045, "dim": -0.045, "aug": -0.045}
+_BIAS = {"maj": 0.0, "min": 0.0, "7": -0.07, "min7": -0.06, "maj7": -0.075, "sus4": -0.06, "sus2": -0.06, "dim": -0.06, "aug": -0.06}
 
 
 @dataclass
@@ -117,7 +117,9 @@ class ChordRecognizer:
                 b[root] = 1.0
                 bass_templates.append(b)
                 self.states.append((root, quality.id))
-                bias.append(_BIAS.get(quality.id, -0.07))
+                # Asking for the full vocabulary signals that extended chords are
+                # expected, so they are held back less.
+                bias.append(_BIAS.get(quality.id, -0.09) * (0.65 if tier == 2 else 1.0))
         self.templates = np.array(templates)
         self.bass_templates = np.array(bass_templates)
         self.bias = np.array(bias)

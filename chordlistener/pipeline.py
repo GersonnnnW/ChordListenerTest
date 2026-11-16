@@ -19,10 +19,11 @@ from .theory import QUALITIES, Chord, Key, note_name, spell_pc
 class AnalysisOptions:
     vocabulary: str = "standard"  # basic | standard | full
     beats_per_bar: int | None = None  # force 3 or 4 instead of detecting
+    tempo_scale: float = 1.0  # 0.5 or 2 to count the beat at half / double speed
     max_seconds: float | None = None
 
     def cache_key(self) -> str:
-        return f"{self.vocabulary}:{self.beats_per_bar or 'auto'}"
+        return f"{self.vocabulary}:{self.beats_per_bar or 'auto'}:{self.tempo_scale:g}"
 
 
 @dataclass
@@ -135,7 +136,7 @@ class Analysis:
         )
 
 
-_ANTICIPATION = 4  # frames
+_LEAD_FRAMES = 3
 
 
 def _extend(beats: np.ndarray, duration: float) -> np.ndarray:
@@ -144,6 +145,26 @@ def _extend(beats: np.ndarray, duration: float) -> np.ndarray:
     before = np.arange(beats[0] - period, -period * 0.5, -period)[::-1]
     after = np.arange(beats[-1] + period, duration + period, period)
     return np.concatenate([before, beats, after])
+
+
+def _align_to_onsets(beats: np.ndarray, notes: list[Note]) -> np.ndarray:
+    """Nudge the beat grid so that notes played on the beat land exactly on it.
+
+    The tracker follows a smoothed loudness curve and sits a few tens of
+    milliseconds off the note attacks, enough to tip a note onto the previous
+    sixteenth when the score is quantised.
+    """
+    if len(notes) < 8:
+        return beats
+    onsets = np.array([n.start for n in notes])
+    nearest = np.clip(np.searchsorted(beats, onsets), 1, len(beats) - 1)
+    nearest = np.where(np.abs(onsets - beats[nearest - 1]) < np.abs(onsets - beats[nearest]), nearest - 1, nearest)
+    offset = onsets - beats[nearest]
+    period = float(np.median(np.diff(beats)))
+    on_beat = offset[np.abs(offset) < 0.2 * period]
+    if len(on_beat) < 8:
+        return beats
+    return beats + float(np.median(on_beat))
 
 
 def analyze_samples(samples: np.ndarray, options: AnalysisOptions | None = None) -> Analysis:
@@ -166,10 +187,10 @@ def analyze_samples(samples: np.ndarray, options: AnalysisOptions | None = None)
 
     t0 = time.perf_counter()
     env = onset_envelope(samples, act.onsets)
-    bpm = estimate_tempo(env)
+    bpm = float(np.clip(estimate_tempo(env) * options.tempo_scale, 30.0, 300.0))
     beats = track_beats(env, bpm)
     if len(beats) >= 4:
-        times = _extend(beats, duration)
+        times = _extend(_align_to_onsets(beats, notes), duration)
     else:
         times = fallback_grid(duration).times
     timings["beats_ms"] = int((time.perf_counter() - t0) * 1000)
@@ -177,9 +198,10 @@ def analyze_samples(samples: np.ndarray, options: AnalysisOptions | None = None)
     t0 = time.perf_counter()
     n_frames = len(act.frames)
     bounds = np.clip(np.round(times * FPS), 0, n_frames)
-    # Pitch activations rise a few frames ahead of the audible attack; reading
-    # each beat slightly late keeps a new chord out of the previous beat.
-    treble, bass = segment_chroma(act.frames, np.clip(bounds + _ANTICIPATION, 0, n_frames))
+    # Pitch activations start rising a few frames before the audible attack,
+    # so each beat's window is read slightly early; otherwise a new chord
+    # leaks into the end of the previous beat.
+    treble, bass = segment_chroma(act.frames, np.clip(bounds - _LEAD_FRAMES, 0, n_frames))
 
     # Bar lines: where the harmony changes and the bass lands.
     unit = treble / np.maximum(np.linalg.norm(treble, axis=1, keepdims=True), 1e-9)
@@ -214,10 +236,10 @@ def analyze_samples(samples: np.ndarray, options: AnalysisOptions | None = None)
         times = np.append(times, times[-1] + (times[-1] - times[-2]))
 
     chords = []
-    for s in spans:
+    for i, s in enumerate(spans):
         lo, hi = max(s.start_beat + shift, origin), min(s.end_beat + shift, stop)
-        if hi <= lo or (s.chord is None and (lo == origin or hi == stop)):
-            continue  # outside the music, or silence padding at either end
+        if hi <= lo or (s.chord is None and i in (0, len(spans) - 1)):
+            continue  # outside the music, or the silence before and after it
         chords.append(ChordEvent(float(times[lo]), float(times[hi]), s.chord, s.confidence, float(lo - origin)))
     timings["chords_ms"] = int((time.perf_counter() - t0) * 1000)
 
