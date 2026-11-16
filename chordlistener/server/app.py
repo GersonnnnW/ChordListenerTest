@@ -503,6 +503,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
 
     # Ad networks need their own script, frame and image origins; none are allowed unless ads are switched on.
     ads = settings.ad_origins if settings.ads else ""
+    frames = ads or "'none'"
     page_headers = {
         "Cache-Control": "no-cache",
         "X-Content-Type-Options": "nosniff",
@@ -511,7 +512,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         "Content-Security-Policy": (
             f"default-src 'self'; script-src 'self' {ads}; style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
             f"img-src 'self' data: {settings.media_origins} {ads}; media-src 'self' blob: {settings.media_origins}; "
-            f"connect-src 'self' {ads}; frame-src {ads or "'none'"}; object-src 'none'; base-uri 'none'; form-action 'none'"
+            f"connect-src 'self' {ads}; frame-src {frames}; object-src 'none'; base-uri 'none'; form-action 'none'"
         ),
     }
     with open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8") as fh:
