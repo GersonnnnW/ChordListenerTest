@@ -31,6 +31,7 @@ OLD_STRENGTH = 0.35  # what the fixed thresholds used to demand
 # (first frame, end frame, key, mean activation, has a clear attack, found by the fixed thresholds too)
 Candidate = tuple[int, int, int, float, bool, bool]
 
+_WINDOW = (-12, -7, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 7, 12)  # semitones around the note
 _BELOW = (12, 19, 24, 28, 31, 7)  # where a note's "parent" would be if it were only an overtone
 _ABOVE = (12, 19, 24, 7)
 FEATURES = (
@@ -41,6 +42,11 @@ FEATURES = (
     + ["neighbour", "neighbour_attack", "crowd", "energy", "rank", "ratio_below", "frame_gain", "louder_same_time"]
     + ["old", "passes_old"]
     + ["partial1", "partial2", "partial3", "partial4", "half", "rise"]  # read from the audio spectrum itself
+    # The raw detector activity in a window around the note: what a musician's ear compares it with.
+    + [f"onset{k:+d}" for k in _WINDOW]
+    + [f"held{k:+d}" for k in _WINDOW]
+    + [f"before{k:+d}" for k in _WINDOW]
+    + ["partial5", "partial6", "partial8"]
 )
 _N_FFT = 4096
 _SPEC_HOP = 512
@@ -94,7 +100,7 @@ def _spectral(spec: np.ndarray, t0: np.ndarray, t1: np.ndarray, key: np.ndarray)
         return np.where(freq < SAMPLE_RATE / 2 - 50, np.clip(value, -20, 60) / 20.0, -1.0)
 
     partials = [level(f0 * h, head) for h in (1, 2, 3, 4)]
-    return [*partials, level(f0 / 2, head), partials[0] - level(f0, before)]
+    return [*partials, level(f0 / 2, head), partials[0] - level(f0, before)], [level(f0 * h, head) for h in (5, 6, 8)]
 
 
 def features(act: Activations, events: list[Candidate], spec: np.ndarray) -> np.ndarray:
@@ -134,6 +140,7 @@ def features(act: Activations, events: list[Candidate], spec: np.ndarray) -> np.
     for i, (a, b, f) in enumerate(zip(t0.tolist(), t1.tolist(), key.tolist())):
         peak[i] = frames[a:b, f].max()
 
+    spectral, high_partials = _spectral(spec, t0, t1, key)
     at = np.minimum(t0 + 2, n_frames - 1)
     here = frames[at, key]
     own_attack = attack(key)
@@ -162,7 +169,11 @@ def features(act: Activations, events: list[Candidate], spec: np.ndarray) -> np.
         (nearby[t0] > own_attack[:, None]).sum(axis=1).astype(np.float64),
         old,
         old * (strength >= OLD_STRENGTH),
-        *_spectral(spec, t0, t1, key),
+        *spectral,
+        *[attack(key + k) for k in _WINDOW],
+        *[mean(t0, np.minimum(t1, t0 + 12), key + k) for k in _WINDOW],
+        *[mean(t0 - 6, t0, key + k) for k in _WINDOW],
+        *high_partials,
     ]
     return np.stack(columns, axis=1).astype(np.float32)
 
@@ -175,6 +186,11 @@ def _load() -> dict | None:
         else:
             with open(_MODEL_PATH) as fh:
                 raw = json.load(fh)
+            names = raw.get("features") or []
+            if not set(names) <= set(FEATURES):
+                _model = {}  # trained on features this code cannot produce: fall back to the fixed thresholds
+                return None
+            raw["columns"] = np.array([FEATURES.index(name) for name in names])
             raw["layers"] = [(np.array(w, dtype=np.float32), np.array(b, dtype=np.float32)) for w, b in raw["layers"]]
             raw["mean"], raw["scale"] = np.array(raw["mean"], dtype=np.float32), np.array(raw["scale"], dtype=np.float32)
             _model = raw
@@ -186,6 +202,8 @@ def probabilities(x: np.ndarray, model: dict | None = None) -> np.ndarray:
     model = model or _load()
     if model is None:
         raise RuntimeError("The note filter model is missing")
+    if "columns" in model:
+        x = x[:, model["columns"]]  # the features this model was trained on, in its order
     h = (x - model["mean"]) / model["scale"]
     for i, (w, b) in enumerate(model["layers"]):
         h = h @ w + b
