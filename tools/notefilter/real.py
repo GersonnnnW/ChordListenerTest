@@ -126,7 +126,8 @@ def slakh(root: str):
         notes = []
         for stem, info in meta["stems"].items():
             midi = os.path.join(folder, "MIDI", stem + ".mid")
-            if info.get("is_drum") or not info.get("audio_rendered", True) or not os.path.exists(midi):
+            # The metadata's "audio_rendered" flag is unreliable; what is in the mix is what has a stem file.
+            if info.get("is_drum") or not os.path.exists(os.path.join(folder, "stems", stem + ".wav")) or not os.path.exists(midi):
                 continue
             notes += read_midi_notes(midi, skip_drum_channel=False)
         name = os.path.basename(folder)
