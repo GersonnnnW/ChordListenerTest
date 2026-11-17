@@ -198,11 +198,21 @@ def decode(out: dict[str, np.ndarray]) -> list[Note]:
 
 
 # Share of the standard detector's confident notes a specialist must also find
-# before its notes are used. Piano: on real piano recordings the two agree on
-# 81-97% of notes; on guitar, voice and band songs mostly far less, and there
-# the piano model misses or invents notes. 0.85 keeps those exactly as good as
-# standard mode while real piano gains almost all of the improvement.
-AGREEMENT = {"piano": 0.85, "guitar": 0.85}
+# before its notes are used at all.
+#   piano   On real piano recordings the two agree on 81-97% of notes; on guitar,
+#           voice and band songs mostly far less, and there the piano model misses
+#           or invents notes. 0.85 keeps those exactly as good as standard mode
+#           while real piano gains almost all of the improvement.
+#   guitar  Below 0.5 the guitar model plainly is not hearing a guitar.
+AGREEMENT = {"piano": 0.85, "guitar": 0.5}
+
+# The piano model's notes replace the standard ones outright. The guitar model
+# is no better than the standard notes on its own (they make different
+# mistakes), so the two are combined instead: a standard note the filter was
+# unsure of (confidence below KEEP) stays only if the guitar model heard it too,
+# and a note only the guitar model heard is added when it is sure (from ADD).
+_COMBINE = {"guitar": (0.7, 0.7)}  # instrument: (KEEP, ADD)
+_SAME_NOTE = 0.08  # seconds between two detections of one note
 
 
 def agreement(standard: list[Note], found: list[Note]) -> float:
@@ -223,6 +233,38 @@ def agreement(standard: list[Note], found: list[Note]) -> float:
         near = [abs(times[j] - n.start) for j in (i - 1, i) if 0 <= j < len(times)]
         hit += bool(near) and min(near) < 0.1
     return hit / len(sure)
+
+
+def _starts_by_key(notes: list[Note]) -> dict[int, np.ndarray]:
+    by_key: dict[int, list[float]] = {}
+    for n in notes:
+        by_key.setdefault(n.pitch, []).append(n.start)
+    return {k: np.array(sorted(v)) for k, v in by_key.items()}
+
+
+def _heard(starts: dict[int, np.ndarray], note: Note) -> bool:
+    times = starts.get(note.pitch)
+    if times is None:
+        return False
+    i = np.searchsorted(times, note.start)
+    return any(abs(times[j] - note.start) < _SAME_NOTE for j in (i - 1, i) if 0 <= j < len(times))
+
+
+def combine(standard: list[Note], found: list[Note], keep: float, add: float) -> list[Note]:
+    """The standard notes checked against a specialist's, plus the ones only it is sure of."""
+    theirs, ours = _starts_by_key(found), _starts_by_key(standard)
+    notes = [n for n in standard if n.confidence >= keep or _heard(theirs, n)]
+    notes += [n for n in found if n.confidence >= add and not _heard(ours, n)]
+    return sorted(notes, key=lambda n: (n.start, n.pitch))
+
+
+def merge(instrument: str, standard: list[Note], found: list[Note]) -> list[Note] | None:
+    """The notes to write in high-accuracy mode, or None when the music is not this instrument."""
+    if agreement(standard, found) < AGREEMENT[instrument]:
+        return None
+    if instrument in _COMBINE:
+        return combine(standard, found, *_COMBINE[instrument])
+    return found
 
 
 def transcribe(samples: np.ndarray, instrument: str = "piano") -> list[Note]:

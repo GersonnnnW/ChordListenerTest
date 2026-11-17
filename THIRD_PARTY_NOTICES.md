@@ -15,9 +15,15 @@ The note-decoding routine in `chordlistener/pitch.py` is a re-implementation of 
 
 ### High-resolution piano transcription model — CC BY 4.0 (weights), MIT (decoding)
 
-`chordlistener/models/piano.onnx`, used by the optional high-accuracy mode, is converted from the checkpoint `CRNN_note_F1=0.9677_pedal_F1=0.9186.pth` published at <https://zenodo.org/records/4034264> under CC BY 4.0: only the note model is kept, converted to ONNX with 16-bit weights (`tools/piano_export.py`). The output decoding in `chordlistener/piano.py` re-implements <https://github.com/qiuqiangkong/piano_transcription_inference> (MIT, Copyright (c) 2020 Qiuqiang Kong). Details and licence text: `chordlistener/models/NOTICE-piano-transcription.txt`.
+`chordlistener/models/piano.onnx`, used by the optional high-accuracy mode, is converted from the checkpoint `CRNN_note_F1=0.9677_pedal_F1=0.9186.pth` published at <https://zenodo.org/records/4034264> under CC BY 4.0: only the note model is kept, converted to ONNX with 16-bit weights (`tools/transcriber_export.py`). The output decoding in `chordlistener/highres.py` re-implements <https://github.com/qiuqiangkong/piano_transcription_inference> (MIT, Copyright (c) 2020 Qiuqiang Kong). Details and licence text: `chordlistener/models/NOTICE-piano-transcription.txt`.
 
 > Qiuqiang Kong, Bochen Li, Xuchen Song, Yuan Wan, Yuxuan Wang. "High-resolution Piano Transcription with Pedals by Regressing Onset and Offset Times." IEEE/ACM Transactions on Audio, Speech, and Language Processing, 2021.
+
+### High-resolution guitar transcription model — MIT
+
+`chordlistener/models/guitar.onnx`, used by the optional high-accuracy mode for guitar, is converted from `guitar-gaps.pth` at <https://huggingface.co/xavriley/midi-transcription-models> (MIT, Xavier Riley): converted to ONNX with 16-bit weights (`tools/transcriber_export.py`). Details and licence text: `chordlistener/models/NOTICE-guitar-transcription.txt`.
+
+> Xavier Riley, Zixun Guo, Drew Edwards, Simon Dixon. "GAPS: A Large and Diverse Classical Guitar Dataset and Benchmark Transcription Model." ISMIR 2024.
 
 ### OpenSheetMusicDisplay — BSD 3-Clause
 

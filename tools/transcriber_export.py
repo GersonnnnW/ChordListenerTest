@@ -11,7 +11,7 @@ The app itself runs the result with ONNX Runtime and never needs PyTorch.
 
 Checkpoints are read with PyTorch's weights-only loader, so a downloaded file
 cannot run code. Only the note part is kept (a pedal model is dropped). The
-spectrogram is computed outside the network (chordlistener/piano.py), so the
+spectrogram is computed outside the network (chordlistener/highres.py), so the
 graph takes a power spectrogram (batch, frames, 1025) and maps it to mel bands
 itself. Weights are stored as float16 and widened to float32 when the model
 loads, which halves the file without changing the results measurably.

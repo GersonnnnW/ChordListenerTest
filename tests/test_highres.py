@@ -86,3 +86,30 @@ def test_old_records_read_as_piano():
 
 def _minimal_record():
     return {"duration": 1.0, "key": [0, False, 0.5], "beats": [0.0, 0.5], "per_bar": 4, "first_downbeat": 0, "chords": [], "notes": []}
+
+
+def test_guitar_notes_are_combined_with_the_standard_ones():
+    from chordlistener.pitch import Note
+
+    standard = [Note(1.0, 1.5, 60, 0.8, 0.95), Note(2.0, 2.5, 64, 0.8, 0.5), Note(3.0, 3.5, 67, 0.8, 0.5)]
+    found = [Note(2.03, 2.5, 64, 0.7, 0.4), Note(4.0, 4.5, 71, 0.7, 0.9), Note(5.0, 5.5, 72, 0.7, 0.3)]
+    kept = highres.combine(standard, found, keep=0.7, add=0.7)
+    # Sure standard note kept; unsure one kept because the guitar model heard it; unsure unheard one dropped;
+    # a note only the guitar model heard is added when it is sure, not when it is unsure.
+    assert [(n.start, n.pitch) for n in kept] == [(1.0, 60), (2.0, 64), (4.0, 71)]
+
+
+def test_merge_keeps_the_standard_notes_when_the_music_is_not_that_instrument():
+    from chordlistener.pitch import Note
+
+    standard = [Note(float(i), i + 0.5, 60 + i, 0.8, 0.9) for i in range(4)]
+    assert highres.merge("piano", standard, []) is None
+    assert highres.merge("guitar", standard, []) is None
+    assert highres.merge("piano", standard, standard) == standard
+
+
+@pytest.mark.skipif(not highres.available("guitar"), reason="guitar model not installed")
+def test_guitar_mode(wav_path):
+    result = analyze(wav_path, AnalysisOptions(accuracy="guitar"))
+    assert result.accuracy == "guitar" and result.note_detector in ("guitar", "standard")
+    assert result.notes and "guitar_model_ms" in result.timings

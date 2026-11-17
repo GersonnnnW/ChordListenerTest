@@ -8,7 +8,7 @@ Audio/video or a song name in → chords, notes, key, tempo, editable sheet musi
 - Work on the branch the session names (earlier: `claude/tender-sagan-dlasng`, `claude/epic-pasteur-t4fqcn`); commit + push when done; no PRs unless asked.
 
 ## Layout (chordlistener/)
-audio.py decode (ffmpeg, video too) · tuning.py concert-pitch check · pitch.py Basic Pitch ONNX + decode_events · piano.py high-accuracy mode (ByteDance piano model, models/piano.onnx 41 MB, made by tools/piano_export.py) · notefilter.py trained note filter (models/notefilter.json) · melody.py trained melody model (models/melody.json) · beats.py · chords.py · arrange.py two-hand layout, grid, lead line · document.py editable score JSON · score.py/musicxml.py notation · guitar.py capo tips · lyrics.py + server/lyricsdb.py (LRCLIB) · server/ FastAPI app, SQLite store, website in server/web.
+audio.py decode (ffmpeg, video too) · tuning.py concert-pitch check · pitch.py Basic Pitch ONNX + decode_events · highres.py high-accuracy mode (specialist models per instrument: models/piano.onnx ByteDance, models/guitar.onnx Riley GAPS; 41 MB each, made by tools/transcriber_export.py) · notefilter.py trained note filter (models/notefilter.json) · melody.py trained melody model (models/melody.json) · beats.py · chords.py · arrange.py two-hand layout, grid, lead line · document.py editable score JSON · score.py/musicxml.py notation · guitar.py capo tips · lyrics.py + server/lyricsdb.py (LRCLIB) · server/ FastAPI app, SQLite store, website in server/web.
 
 ## Commands
 - Tests: `python -m pytest -q` (all must pass; CI on Python 3.10 + 3.13 — avoid 3.12-only syntax).

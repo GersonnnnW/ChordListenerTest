@@ -244,9 +244,9 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
         # then agree on most notes). Beats and chords stay with Basic Pitch.
         t0 = time.perf_counter()
         accuracy = options.accuracy
-        found = highres.transcribe(samples, accuracy)
-        if highres.agreement(notes, found) >= highres.AGREEMENT[accuracy]:
-            notes, detector = found, accuracy
+        merged = highres.merge(accuracy, notes, highres.transcribe(samples, accuracy))
+        if merged is not None:
+            notes, detector = merged, accuracy
         timings[f"{accuracy}_model_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()

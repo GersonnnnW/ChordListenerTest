@@ -439,6 +439,15 @@ def test_a_song_found_by_name_can_be_switched_to_high_accuracy(client):
     assert client.post("/v1/transcriptions/nope/reanalyze").status_code == 404
 
 
+@pytest.mark.skipif(not __import__("chordlistener.highres").highres.available("guitar"), reason="guitar model not installed")
+def test_guitar_accuracy(client, wav_path):
+    assert "guitar" in client.get("/v1/health").json()["high_accuracy"]
+    body = upload(client, wav_path, data={"accuracy": "guitar"}).json()
+    assert body["status"] == "completed" and body["result"]["accuracy"] == "guitar"
+    piano = client.post(f"/v1/transcriptions/{body['id']}/reanalyze", data={"accuracy": "piano"})
+    assert piano.status_code == 400  # an upload has to be sent again
+
+
 def test_high_accuracy_can_be_switched_off(tmp_path, wav_path):
     with make_client(tmp_path, wav_path, high_accuracy=False) as c:
         assert c.get("/v1/health").json()["high_accuracy"] == []

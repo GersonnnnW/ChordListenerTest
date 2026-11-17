@@ -9,9 +9,9 @@ Attribution 4.0 International licence (https://creativecommons.org/licenses/by/4
 Changes made: only the note part of the checkpoint is kept (the pedal model is
 dropped); the network was converted from PyTorch to ONNX with the spectrogram
 front end moved outside the graph, and its weights stored as 16-bit floats
-(tools/piano_export.py).
+(tools/transcriber_export.py).
 
-The decoding of the model's outputs in chordlistener/piano.py is a
+The decoding of the model's outputs in chordlistener/highres.py is a
 re-implementation of piano_transcription_inference
 (https://github.com/qiuqiangkong/piano_transcription_inference), licensed as follows:
 

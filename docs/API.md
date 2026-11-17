@@ -30,7 +30,7 @@ Send **exactly one** of `file` or `track_id`.
 | `vocabulary` | string | `standard` | `basic` = major/minor only. `standard` adds 7, maj7, m7, sus2, sus4, dim, aug. `full` adds 6, m6, m7b5, dim7 and reports extended chords more readily |
 | `beats_per_bar` | integer | detect | Force `3` or `4` |
 | `tempo` | string | `auto` | `half` or `double` counts the beat at half / twice the detected speed |
-| `accuracy` | string | `standard` | `high` adds a large piano-specialised note detector. On piano recordings it writes far more of the notes correctly; on other music (guitar, voice, bands) the standard notes are kept, so it is never worse. Takes about ten times longer (a 3-minute song: ~20 s instead of ~2 s). See [Analyse again](#analyse-again-eg-in-high-accuracy-mode) to switch an existing transcription |
+| `accuracy` | string | `standard` | High-accuracy mode: `piano` or `guitar` adds a large note detector made for that instrument. Takes about ten times longer (a 3-minute song: ~20 s instead of ~2 s). **`piano`**: on piano recordings far more of the notes are written correctly; on other music the standard notes are kept, so it is never worse. **`guitar`**: the guitar detector's notes are combined with the standard ones (each confirms or adds to the other); a small but consistent gain on guitar recordings. `high` is an older name for `piano`. See [Analyse again](#analyse-again-eg-in-high-accuracy-mode) to switch an existing transcription |
 | `title`, `artist` | string | | Carried into the sheet music and file names, and used to look up lyrics. If omitted they are guessed from the file name ("Artist - Title.mp3") |
 
 Query parameter `wait` (default `true`): hold the request open until the result is ready. Most songs finish in a few seconds. With `wait=false`, or if the wait runs out, the response is `202` with `"status": "processing"`; poll `GET /v1/transcriptions/{id}`.
@@ -121,7 +121,7 @@ Field notes:
 - `tuning.cents` is how far the recording sits from concert pitch (negative = flat); `reference_hz` is the same thing as the frequency of its A. When the offset is 15 cents or more the audio is brought to pitch before analysis (`corrected`), so chords and notes are reported at the nearest standard pitch.
 - For a video upload, `source.video` is `true` and `links.audio` points to an MP3 of its soundtrack until `audio_expires_at`.
 - `cached` is `true` when this exact audio and settings had been analysed before; the request then returns in milliseconds.
-- `accuracy` is the mode asked for. `note_detector` says which detector wrote the notes: `piano` when high-accuracy mode recognised piano music and used the piano model, otherwise `standard`.
+- `accuracy` is the mode used: `standard`, `piano` or `guitar`. `note_detector` says which notes were written: the instrument's name when high-accuracy mode recognised that instrument and used its detector, otherwise `standard`.
 
 ## Analyse again, e.g. in high-accuracy mode
 
@@ -131,13 +131,13 @@ Analyses the same song again with the same settings (`vocabulary`, `beats_per_ba
 
 | Field | Type | Default | |
 |---|---|---|---|
-| `accuracy` | string | `high` | `standard` or `high` |
+| `accuracy` | string | `piano` | `standard`, `piano` or `guitar` |
 | `file` | file | | The same file again. Needed only for an **uploaded** file whose result in that mode is not cached yet, because uploads are never kept. A different file is rejected |
 
 A song found by name (`track_id`) needs nothing extra: the server fetches it again from the catalogue.
 
 ```bash
-curl -H "Authorization: Bearer $KEY" -F "accuracy=high" \
+curl -H "Authorization: Bearer $KEY" -F "accuracy=guitar" \
      https://api.example.com/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w/reanalyze
 ```
 
@@ -295,9 +295,9 @@ Pass an instance to `create_app(settings, catalog=MyCatalog())`. Results are cac
 
 ## Health
 
-`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "3", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000, "high_accuracy": true}`
+`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "3", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000, "high_accuracy": ["piano", "guitar"]}`
 
-`high_accuracy` says whether this server offers `accuracy=high`.
+`high_accuracy` lists the instruments this server offers high-accuracy mode for (empty when it is switched off).
 
 ## Errors
 
