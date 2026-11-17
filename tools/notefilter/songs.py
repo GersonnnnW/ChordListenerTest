@@ -68,7 +68,7 @@ def random_spec(seed: int, unseen: bool = False) -> dict:
     drums = rng.random() < 0.8
     if rng.random() < 0.2:
         # One instrument playing everything: a pianist or guitarist alone.
-        solo = rng.choice([1, 4, 5, 24, 25, 26] if not unseen else [0, 2, 27])
+        solo = rng.choice([1, 4, 5, 24, 25, 26] if not unseen else [2, 27, 18])
         programs, drums = (solo, solo, solo), False
     return dict(
         progression=progression,
