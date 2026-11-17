@@ -136,10 +136,11 @@ def slakh(root: str):
 
 def smd(root: str):
     for mid in sorted(glob.glob(os.path.join(root, "smd", "files", "*.mid"))):
-        mp3 = mid[:-4] + ".mp3"
-        if os.path.exists(mp3):
+        # The old website offered MP3 previews; the Zenodo release (v2) has WAV files.
+        audio = next((mid[:-4] + ext for ext in (".mp3", ".wav") if os.path.exists(mid[:-4] + ext)), None)
+        if audio:
             name = os.path.basename(mid)[:-4]
-            yield "smd", name, name, mp3, read_midi_notes(mid)
+            yield "smd", name, name, audio, read_midi_notes(mid)
 
 
 def main() -> None:

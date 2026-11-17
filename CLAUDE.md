@@ -5,7 +5,7 @@ Audio/video or a song name in → chords, notes, key, tempo, editable sheet musi
 ## Owner
 - Not a programmer; explain in plain words, short. Runs it on a Mac (Python 3.13; 3.14+ lacks onnxruntime wheels): `python3.13 -m pip install ".[server]"` then `python3.13 -m chordlistener.cli serve` → http://127.0.0.1:8000.
 - Priorities: sheet music a musician can play correctly; fast and cheap to run; ready for ads later (CL_ADS); keep token use low (keep replies brief, avoid dumping big outputs).
-- Work on the branch the session names (earlier: `claude/tender-sagan-dlasng`, `claude/epic-pasteur-t4fqcn`); commit + push when done; no PRs unless asked.
+- Work on `claude/epic-pasteur-t4fqcn` (the current branch; `claude/tender-sagan-dlasng` is old and lacks high-accuracy mode) unless the session names another; commit + push when done; no PRs unless asked.
 
 ## Layout (chordlistener/)
 audio.py decode (ffmpeg, video too) · tuning.py concert-pitch check · pitch.py Basic Pitch ONNX + decode_events · highres.py high-accuracy mode (specialist models per instrument: models/piano.onnx ByteDance, models/guitar.onnx Riley GAPS; 41 MB each, made by tools/transcriber_export.py) · notefilter.py trained note filter (models/notefilter.json) · melody.py trained melody model (models/melody.json) · beats.py · chords.py · arrange.py two-hand layout, grid, lead line · document.py editable score JSON · score.py/musicxml.py notation · guitar.py capo tips · lyrics.py + server/lyricsdb.py (LRCLIB) · server/ FastAPI app, SQLite store, website in server/web.
@@ -31,6 +31,7 @@ Weakest: singing (~60%), dense full-band mixes.
 ## Tried, did not help (don't repeat)
 - Wider local-context features (87 instead of 42) + 480 generated songs: better on generated songs, worse on real piano/voice. The note filter is at a plateau (real piano F≈0.81, guitar 0.84); more filter tuning gives ~1 point at most.
 - Resolving semitone clashes in chords: no measurable gain.
+- Note filter with guitar weighted more (2026-11-17, on the PC; not the guitar-model fine-tune below): retrained on the shipped 42 features with guitar counted 2×/4×/6× (`--features=shipped --weight.guitar=N`, 160 generated train songs). Best (4×) vs shipped filter F: guitar 0.845 vs 0.841, but voice 0.580 vs 0.610, unseen instruments 0.732 vs 0.752, piano 0.830 vs 0.833. Not shipped.
 
 - Guitar model replacing the standard notes (any agreement threshold): worse on real steel-string guitar.
 - Piano model on its own for everything: much worse on guitar (F 0.80 → 0.52) and band songs (melody line collapses). Union of both detectors' notes: worse than either alone on guitar.
