@@ -13,6 +13,7 @@ from .beats import BeatGrid, estimate_tempo, fallback_grid, find_bars, onset_env
 from .chords import ChordRecognizer, estimate_key, segment_chroma
 from .pitch import FPS, MIDI_OFFSET, Note, decode_notes, run_model
 from .theory import QUALITIES, Chord, Key, note_name, spell_pc
+from .tuning import estimate_tuning, retune
 
 
 @dataclass
@@ -45,6 +46,8 @@ class Analysis:
     notes: list[Note]
     processing_ms: int = 0
     timings: dict = field(default_factory=dict)
+    tuning_cents: float = 0.0  # how far the recording sits from concert pitch
+    tuning_corrected: bool = False  # whether that was undone before analysing
 
     @property
     def bpm(self) -> float:
@@ -85,6 +88,11 @@ class Analysis:
             "transpose": transpose,
             "beats": [round(float(t), 3) for t in grid.times],
             "first_downbeat": grid.first_downbeat,
+            "tuning": {
+                "cents": round(self.tuning_cents),
+                "reference_hz": round(440.0 * 2 ** (self.tuning_cents / 1200), 1),
+                "corrected": self.tuning_corrected,
+            },
             "chords": chords,
             "processing_ms": self.processing_ms,
         }
@@ -117,6 +125,7 @@ class Analysis:
             ],
             "notes": [[round(n.start, 4), round(n.end, 4), n.pitch, round(n.velocity, 3)] for n in self.notes],
             "ms": self.processing_ms,
+            "tuning": [round(self.tuning_cents, 1), self.tuning_corrected],
         }
 
     @classmethod
@@ -133,6 +142,8 @@ class Analysis:
             chords=chords,
             notes=[Note(*n) for n in rec["notes"]],
             processing_ms=rec.get("ms", 0),
+            tuning_cents=rec.get("tuning", [0.0, False])[0],
+            tuning_corrected=bool(rec.get("tuning", [0.0, False])[1]),
         )
 
 
@@ -170,6 +181,30 @@ def _align_to_onsets(beats: np.ndarray, notes: list[Note]) -> np.ndarray:
 def analyze_samples(samples: np.ndarray, options: AnalysisOptions | None = None) -> Analysis:
     """Analyse mono float32 audio sampled at 22.05 kHz."""
     options = options or AnalysisOptions()
+    started = time.perf_counter()
+    cents, confidence = estimate_tuning(samples)
+    if confidence < 0.35 or abs(cents) < _RETUNE_FROM:
+        result = _analyze(samples, options)
+        result.tuning_cents = cents if confidence >= 0.35 else 0.0
+    else:
+        # Bring the recording to concert pitch first, then map every time back.
+        shifted, stretch = retune(samples, cents)
+        result = _analyze(shifted, options)
+        result.tuning_cents, result.tuning_corrected = cents, True
+        result.duration = len(samples) / SAMPLE_RATE
+        result.grid.times = result.grid.times * stretch
+        for note in result.notes:
+            note.start, note.end = note.start * stretch, note.end * stretch
+        for chord in result.chords:
+            chord.start, chord.end = chord.start * stretch, chord.end * stretch
+    result.processing_ms = int((time.perf_counter() - started) * 1000)
+    return result
+
+
+_RETUNE_FROM = 15.0  # cents; below this the pitch model copes on its own
+
+
+def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
     started = time.perf_counter()
     timings = {}
     duration = len(samples) / SAMPLE_RATE

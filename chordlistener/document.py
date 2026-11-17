@@ -30,8 +30,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import guitar
+from .arrange import arrange
 from .pipeline import Analysis
-from .score import DIVISIONS, Harmony, Measure, Score, lay_out, melody, slashes, underlay, voice
+from .score import DIVISIONS, Harmony, Measure, Score, lay_out, slashes, underlay
 from .theory import Key, parse_chord_symbol, spell, spell_pc
 
 ARRANGEMENTS = {"piano": 2, "lead": 1}  # name -> number of staves
@@ -50,6 +52,7 @@ class ShowOptions:
     lyrics: bool = True
     tempo: bool = True
     key: bool = True
+    capo: int = 0  # print "Capo N" (the chords are written for a guitar with a capo there)
 
 
 @dataclass
@@ -73,17 +76,7 @@ def document_from_analysis(analysis: Analysis, title: str = "", artist: str = ""
     n_bars = max(1, (len(grid.times) - 1) // grid.per_bar)
     total = n_bars * bar
 
-    quantised: list[tuple[int, int, int, float]] = []
-    if analysis.notes:
-        starts = grid.position(np.array([n.start for n in analysis.notes])) * DIVISIONS
-        ends = grid.position(np.array([n.end for n in analysis.notes])) * DIVISIONS
-        for note, s, e in zip(analysis.notes, starts, ends):
-            start = int(round(s))
-            if not 21 <= note.pitch <= 108 or start >= total:
-                continue
-            start = max(0, start)
-            length = max(1, int(round(e)) - start)
-            quantised.append((start, min(length, total - start), note.pitch, note.velocity))
+    arrangement = arrange(analysis, total, max_notes_per_chord)
 
     chords: list[list] = []
     previous = None
@@ -97,9 +90,6 @@ def document_from_analysis(analysis: Analysis, title: str = "", artist: str = ""
     def staff(events) -> list[list]:
         return [[start, length, list(pitches)] for start, length, pitches in events]
 
-    upper = voice([n for n in quantised if n[2] >= 60], total, max_notes_per_chord, "top")
-    lower = voice([n for n in quantised if n[2] < 60], total, max_notes_per_chord, "bottom")
-    line = voice(melody(quantised), total, 1, "top")
     return {
         "version": 1,
         "title": title,
@@ -110,7 +100,7 @@ def document_from_analysis(analysis: Analysis, title: str = "", artist: str = ""
         "beats": [round(float(t), 3) for t in grid.times[: n_bars * grid.per_bar + 1]],
         "chords": chords,
         "lyrics": {},
-        "arrangements": {"piano": [staff(upper), staff(lower)], "lead": [staff(line)]},
+        "arrangements": {"piano": [staff(arrangement.right), staff(arrangement.left)], "lead": [staff(arrangement.melody)]},
     }
 
 
@@ -260,7 +250,12 @@ def document_view(doc: dict, transpose: int = 0) -> dict:
     per_bar = doc["beats_per_bar"]
     beats = doc["beats"]
     chords = []
+    playable: list[tuple] = []
     for i, (beat, symbol) in enumerate(doc["chords"]):
+        parsed = parse_chord_symbol(symbol)
+        if parsed is not None:
+            after = doc["chords"][i + 1][0] if i + 1 < len(doc["chords"]) else len(beats) - 1
+            playable.append((parsed.chord, after - beat))
         shown, notes, root = _chord_text(symbol, key, transpose)
         end_beat = doc["chords"][i + 1][0] if i + 1 < len(doc["chords"]) else len(beats) - 1
         chords.append(
@@ -284,7 +279,23 @@ def document_view(doc: dict, transpose: int = 0) -> dict:
         "chords": chords,
         "has_lyrics": bool(doc["lyrics"]),
         "transpose": transpose,
+        "guitar": _guitar_tip(playable, key.transposed(-transpose)),
     }
+
+
+def _guitar_tip(chords: list[tuple], key: Key) -> dict | None:
+    """Suggest a capo (or dropped tuning) when the sounding chords are awkward on guitar."""
+    tip = guitar.suggest(chords)
+    if tip is None:
+        return None
+    easier = key.transposed(tip["transpose"])
+    seen: list[str] = []
+    for chord, _ in chords:
+        name = chord.transposed(tip["transpose"]).symbol(easier)
+        if name not in seen:
+            seen.append(name)
+    return {"transpose": tip["transpose"], "capo": tip.get("capo", 0), "tune_down": tip.get("tune_down", 0), "chords": seen[:8]}
+
 
 
 def score_from_document(doc: dict, arrangement: str = "piano", transpose: int = 0, show: ShowOptions | None = None) -> Score:
@@ -338,6 +349,8 @@ def score_from_document(doc: dict, arrangement: str = "piano", transpose: int = 
         details.append(f"Key: {key.name}")
     if show.tempo:
         details.append(f"Tempo: {round(doc['bpm'])} BPM")
+    if show.capo and show.chords:
+        details.append(f"Capo {show.capo}")
     return Score(
         measures=measures,
         key=key,
@@ -385,6 +398,8 @@ def chord_chart(doc: dict, transpose: int = 0, bars_per_line: int = 4, show: Sho
     if show.tempo:
         facts.append(f"Tempo: {round(doc['bpm'])} bpm")
     facts.append(f"Time: {per_bar}/4")
+    if show.capo and show.chords:
+        facts.append(f"Capo {show.capo}")
     lines += [" | ".join(facts), ""]
     for i in range(0, n_bars, bars_per_line):
         if show.chords:

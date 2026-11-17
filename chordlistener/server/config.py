@@ -22,7 +22,7 @@ def _int(name: str, default: int) -> int:
 class Settings:
     data_dir: str = field(default_factory=lambda: os.environ.get("CL_DATA_DIR", "./data"))
     # Largest upload accepted, and longest audio analysed (longer files are cut).
-    max_upload_mb: int = field(default_factory=lambda: _int("CL_MAX_UPLOAD_MB", 60))
+    max_upload_mb: int = field(default_factory=lambda: _int("CL_MAX_UPLOAD_MB", 1000))
     max_seconds: int = field(default_factory=lambda: _int("CL_MAX_SECONDS", 900))
     # Analyses running at once. Each one already uses several cores.
     workers: int = field(default_factory=lambda: _int("CL_WORKERS", 2))
@@ -40,6 +40,11 @@ class Settings:
     wait_seconds: int = field(default_factory=lambda: _int("CL_WAIT_SECONDS", 120))
     # Where the website may load artwork and preview audio from (the catalogue's CDN).
     media_origins: str = field(default_factory=lambda: os.environ.get("CL_MEDIA_ORIGINS", "https://*.apple.com https://*.mzstatic.com"))
+    # Where lyrics are looked up: "lrclib" or "none".
+    lyrics: str = field(default_factory=lambda: os.environ.get("CL_LYRICS", "lrclib"))
+    # Videos are converted to MP3 so they can be played back in the browser.
+    # How long that MP3 is kept before it is deleted (0 = never keep one).
+    keep_audio_minutes: int = field(default_factory=lambda: _int("CL_KEEP_AUDIO_MINUTES", 120))
     # Show the reserved advertising spaces on the website, and which ad-network
     # origins the page may load from (space separated) once they are filled.
     ads: bool = field(default_factory=lambda: _bool("CL_ADS", False))

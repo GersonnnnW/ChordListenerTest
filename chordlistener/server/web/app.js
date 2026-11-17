@@ -25,6 +25,10 @@ const state = {
   objectUrl: null,
   input: null, // what was analysed, so it can be re-run with other settings
   tempo: "auto",
+  capo: false, // showing the chords a guitarist would play (capo or dropped tuning)
+  lyrics: null, // what the lyrics lookup found for this song
+  links: {},
+  maxUploadMb: 1000,
   osmd: null,
   sheetStale: true,
   beatEls: [],
@@ -222,8 +226,36 @@ function analyzeTrack(track) {
   submit();
 }
 
+/** POST a form, reporting upload progress (fetch cannot do that yet). */
+function send(path, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", path);
+    request.responseType = "json";
+    request.upload.addEventListener("progress", (event) => { if (event.lengthComputable) onProgress(event.loaded / event.total); });
+    request.addEventListener("load", () => {
+      const body = request.response;
+      if (request.status >= 400 && request.status !== 422) {
+        reject(new Error((body && body.error && body.error.message) || "Something went wrong. Please try again."));
+      } else if (!body) {
+        reject(new Error("The server sent an answer that could not be read."));
+      } else {
+        resolve(body);
+      }
+    });
+    request.addEventListener("error", () => reject(new Error("Could not reach the server. Check your connection and try again.")));
+    request.send(form);
+  });
+}
+
+api("/v1/health").then((health) => { state.maxUploadMb = health.max_upload_mb || state.maxUploadMb; }).catch(() => {});
+
 async function submit() {
   const input = state.input;
+  if (input.file && input.file.size > state.maxUploadMb * 1024 * 1024) {
+    fail(`That file is ${Math.round(input.file.size / 1048576)} MB. The largest upload accepted here is ${state.maxUploadMb} MB.`);
+    return;
+  }
   const form = new FormData();
   if (input.file) {
     form.append("file", input.file);
@@ -234,9 +266,19 @@ async function submit() {
   form.append("tempo", state.tempo);
   $("error").hidden = true;
   $("working-name").textContent = input.name;
+  const big = Boolean(input.file) && input.file.size > 8 * 1024 * 1024;
+  $("working-step").textContent = big ? "Uploading" : "Listening to";
+  $("working-progress").hidden = !big;
+  $("working-progress").value = 0;
   show("working");
   try {
-    let body = await api("/v1/transcriptions", { method: "POST", body: form });
+    let body = await send("/v1/transcriptions", form, (done) => {
+      $("working-progress").value = Math.round(done * 100);
+      if (done >= 1) {
+        $("working-step").textContent = "Listening to";
+        $("working-progress").hidden = true;
+      }
+    });
     if (body.edit_token) rememberToken(body.id, body.edit_token);
     while (body.status === "processing") {
       await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -264,6 +306,11 @@ function retime(direction) {
 $("half").addEventListener("click", () => retime(-1));
 $("double").addEventListener("click", () => retime(1));
 
+function convertedAudio() {
+  const token = (store("cl-edit-tokens") || {})[state.id];
+  return state.links.audio && token ? `${state.links.audio}?token=${encodeURIComponent(token)}` : "";
+}
+
 function releaseAudio() {
   const audio = $("audio");
   audio.pause();
@@ -278,7 +325,10 @@ function releaseAudio() {
 async function present(body, audioUrl) {
   state.id = body.id;
   state.source = body.source;
+  state.links = body.links || {};
   state.transpose = 0;
+  state.capo = false;
+  state.lyrics = null;
   state.undo = [];
   state.redo = [];
   state.sel = null;
@@ -290,7 +340,17 @@ async function present(body, audioUrl) {
   if (source.artwork_url) $("artwork").src = source.artwork_url;
   $("clip-note").hidden = source.type !== "catalog";
 
-  const url = audioUrl || source.preview_url || "";
+  const tuning = body.result && body.result.tuning;
+  const offPitch = Boolean(tuning) && Math.abs(tuning.cents) >= 10;
+  $("chip-tuning").hidden = !offPitch;
+  if (offPitch) {
+    $("fact-tuning").textContent = `A = ${Math.round(tuning.reference_hz)} Hz`;
+    $("chip-tuning").title = `This recording is ${Math.abs(tuning.cents)} cents ${tuning.cents < 0 ? "flat" : "sharp"} of standard pitch. Chords and notes are shown at the nearest standard pitch.`;
+  }
+
+  // Without the original file to hand (a shared link, or a video the browser
+  // cannot play), fall back to the MP3 the server made from an uploaded video.
+  const url = audioUrl || source.preview_url || convertedAudio() || "";
   $("player").classList.toggle("silent", !url);
   if (url && $("audio").getAttribute("src") !== url) $("audio").src = url;
   $("half").hidden = $("double").hidden = !state.input;
@@ -305,6 +365,7 @@ async function present(body, audioUrl) {
   selectTab("chords");
   draw();
   show("result");
+  loadLyrics();
   history.replaceState(null, "", `?${params.has("embed") ? "embed=1&" : ""}t=${encodeURIComponent(body.id)}`);
   window.scrollTo({ top: 0 });
 }
@@ -330,10 +391,82 @@ function draw() {
   $("seek").max = Math.max(view.duration, (state.source && state.source.audio_seconds) || 0);
   applyShow();
   renderChart();
+  drawGuitarTip();
+  drawLyricsPanel();
   drawEditBar();
   state.lastBeat = -1;
   state.lastChord = -2;
   sync();
+}
+
+// A guitarist rarely plays the sounding chords of a song in B flat minor:
+// offer the capo position (or dropped tuning) that turns them into easy shapes.
+function drawGuitarTip() {
+  const tip = state.view.guitar;
+  const applied = Boolean(tip) && state.capo && state.transpose === tip.transpose;
+  const how = tip && (tip.capo ? `a capo on fret ${tip.capo}` : "the guitar tuned down a half step");
+  $("guitar-tip").hidden = !tip || state.editing;
+  if (tip) {
+    $("tip-text").textContent = applied
+      ? `Showing the chords as played with ${how}. They sound in ${state.doc ? keyName(0) : "the original key"}.`
+      : `Guitar: these chords are easier with ${how} — ${tip.chords.join(", ")}.`;
+    $("tip-apply").textContent = applied ? "Show the sounding chords" : "Show those chords";
+  }
+  const label = $("capo-label");
+  label.hidden = !applied;
+  if (applied) label.textContent = tip.capo ? `Capo ${tip.capo}` : "Tuned ½ step down";
+}
+
+function keyName(shift) {
+  const key = state.doc.key;
+  const names = key.minor ? MINOR_KEYS : MAJOR_KEYS;
+  return `${names[(key.tonic + shift + 12) % 12]} ${key.minor ? "minor" : "major"}`;
+}
+
+$("tip-apply").addEventListener("click", () => {
+  const tip = state.view.guitar;
+  if (!tip) return;
+  const applied = state.capo && state.transpose === tip.transpose;
+  state.capo = !applied;
+  state.transpose = applied ? 0 : tip.transpose;
+  refresh();
+});
+
+function capoNumber() {
+  const tip = state.view && state.view.guitar;
+  return tip && state.capo && state.transpose === tip.transpose ? tip.capo : 0;
+}
+
+// ---------------------------------------------------------------- lyrics
+
+async function loadLyrics() {
+  const id = state.id;
+  try {
+    const found = await api(`/v1/transcriptions/${id}/lyrics`, { headers: tokenHeader() });
+    if (state.id === id) { state.lyrics = found; drawLyricsPanel(); }
+  } catch { /* lyrics are a bonus */ }
+}
+
+/** Lyrics that could not be lined up with the bars are still worth showing, as plain text. */
+function drawLyricsPanel() {
+  const found = state.lyrics;
+  const placed = state.doc && Object.keys(state.doc.lyrics).length > 0;
+  const panel = $("lyrics-panel");
+  panel.hidden = !found || !found.found || placed;
+  if (panel.hidden) return;
+  const excerpt = state.source && state.source.type === "catalog";
+  $("lyrics-note").textContent = excerpt
+    ? "These are the words of the whole song. What you are hearing is a 30-second excerpt, so they could not be placed under the bars; upload the full track and they will be."
+    : "These could not be lined up with the bars automatically. Use Edit, then Find lyrics or Paste lyrics, to place them.";
+  const text = $("lyrics-text");
+  text.replaceChildren();
+  let last = null;
+  for (const line of found.lines) {
+    if (last !== null && line.time !== null && line.time - last > 9) text.append(el("p", "gap"));
+    text.append(el("p", "", line.text));
+    last = line.time;
+  }
+  $("lyrics-source").textContent = found.source === "lrclib" ? "Lyrics from LRCLIB (lrclib.net)." : `Lyrics from ${found.source}.`;
 }
 
 function applyShow() {
@@ -424,7 +557,13 @@ audio.addEventListener("play", () => { setPlaying(true); requestAnimationFrame(t
 audio.addEventListener("pause", () => setPlaying(false));
 audio.addEventListener("ended", () => setPlaying(false));
 audio.addEventListener("timeupdate", () => sync());
-audio.addEventListener("error", () => { if (audio.getAttribute("src")) $("player").classList.add("silent"); });
+audio.addEventListener("error", () => {
+  const current = audio.getAttribute("src");
+  if (!current) return;
+  const fallback = convertedAudio();
+  if (fallback && current !== fallback) audio.src = fallback; // e.g. an AVI: play the converted MP3 instead
+  else $("player").classList.add("silent");
+});
 $("seek").addEventListener("input", () => seekTo(parseFloat($("seek").value)));
 
 function seekTo(seconds) {
@@ -517,7 +656,7 @@ function renderRequest(extra) {
   return api("/v1/score/render", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ document: state.doc, arrangement: state.arrangement, transpose: state.transpose, show: state.show, ...extra }),
+    body: JSON.stringify({ document: state.doc, arrangement: state.arrangement, transpose: state.transpose, capo: capoNumber(), show: state.show, ...extra }),
   });
 }
 
@@ -558,6 +697,7 @@ function transposeBy(step) {
   const next = Math.max(-11, Math.min(11, state.transpose + step));
   if (next === state.transpose || !state.id) return;
   state.transpose = next;
+  state.capo = false; // a hand-picked transposition is not a capo position
   refresh();
 }
 $("down").addEventListener("click", () => transposeBy(-1));
@@ -683,7 +823,7 @@ function setEditing(on, quiet) {
   $("edit").hidden = on;
   $("down").disabled = $("up").disabled = on;
   if (quiet) return;
-  if (on && state.transpose !== 0) state.transpose = 0; // corrections are made at the original pitch
+  if (on) { state.transpose = 0; state.capo = false; } // corrections are made at the original pitch
   state.sheetStale = true;
   refresh();
 }
@@ -819,6 +959,38 @@ function setLyric(bar, text) {
   }, "none");
   state.view.has_lyrics = Object.keys(state.doc.lyrics).length > 0;
 }
+
+$("find-lyrics").addEventListener("click", async () => {
+  const button = $("find-lyrics");
+  const status = $("edit-status");
+  if (!state.doc.title) { status.textContent = "Fill in the title (and artist) first, then try again."; return; }
+  button.disabled = true;
+  button.textContent = "Searching…";
+  try {
+    const form = new FormData();
+    form.append("title", state.doc.title);
+    form.append("artist", state.doc.artist);
+    const found = await api(`/v1/transcriptions/${state.id}/lyrics`, { method: "POST", body: form, headers: tokenHeader() });
+    state.lyrics = found;
+    if (!found.found) {
+      status.textContent = `No lyrics found for "${state.doc.title}". Check the title and artist, or paste them in.`;
+    } else if (found.bars && Object.keys(found.bars).length) {
+      edit((doc) => { doc.lyrics = found.bars; });
+      status.textContent = "Lyrics added under the bars.";
+    } else {
+      // Found, but without timings that fit this recording: let the person place them.
+      $("ly-text").value = found.lines.map((line) => line.text).join("\n");
+      $("ly-start").max = state.view.bars;
+      $("lyrics-dialog").showModal();
+    }
+    drawLyricsPanel();
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Find lyrics";
+  }
+});
 
 $("paste-lyrics").addEventListener("click", () => {
   $("ly-start").max = state.view.bars;
@@ -1162,6 +1334,9 @@ $("download").addEventListener("click", () => {
   document.querySelector(`input[name="dl-arrangement"][value="${state.arrangement}"]`).checked = true;
   $("dl-midi").href = `/v1/transcriptions/${state.id}/midi?transpose=${state.transpose}`;
   $("dl-json").href = `/v1/transcriptions/${state.id}/score`;
+  const mp3 = convertedAudio();
+  $("dl-mp3").hidden = $("dl-mp3-dot").hidden = !mp3;
+  if (mp3) $("dl-mp3").href = mp3;
   $("dl-error").hidden = true;
   syncDownloadDialog();
   $("download-dialog").showModal();

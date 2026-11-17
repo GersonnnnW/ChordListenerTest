@@ -25,12 +25,12 @@ Send **exactly one** of `file` or `track_id`.
 
 | Field | Type | Default | |
 |---|---|---|---|
-| `file` | file | | MP3, WAV, M4A/AAC, FLAC, OGG, AIFF or WebM |
+| `file` | file | | Audio (MP3, WAV, M4A/AAC, FLAC, OGG, AIFF) or video (MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG); a video's soundtrack is used |
 | `track_id` | string | | A track from `GET /v1/songs/search` |
 | `vocabulary` | string | `standard` | `basic` = major/minor only. `standard` adds 7, maj7, m7, sus2, sus4, dim, aug. `full` adds 6, m6, m7b5, dim7 and reports extended chords more readily |
 | `beats_per_bar` | integer | detect | Force `3` or `4` |
 | `tempo` | string | `auto` | `half` or `double` counts the beat at half / twice the detected speed |
-| `title`, `artist` | string | | Carried into the sheet music and file names |
+| `title`, `artist` | string | | Carried into the sheet music and file names, and used to look up lyrics. If omitted they are guessed from the file name ("Artist - Title.mp3") |
 
 Query parameter `wait` (default `true`): hold the request open until the result is ready. Most songs finish in a few seconds. With `wait=false`, or if the wait runs out, the response is `202` with `"status": "processing"`; poll `GET /v1/transcriptions/{id}`.
 
@@ -80,7 +80,7 @@ Requests made **without** an API key also get an `"edit_token"` in this response
   "source": {"type": "upload", "filename": "song.mp3", "title": "My Song", "artist": "", "audio_seconds": 213.4,
              "options": {"vocabulary": "standard", "beats_per_bar": null, "tempo": "auto"}},
   "result": {
-    "engine_version": "1",
+    "engine_version": "2",
     "duration": 213.4,
     "tempo_bpm": 73.0,
     "time_signature": "4/4",
@@ -88,6 +88,7 @@ Requests made **without** an API key also get an `"edit_token"` in this response
     "transpose": 0,
     "beats": [0.51, 1.33, 2.15, 2.97],
     "first_downbeat": 0,
+    "tuning": {"cents": -31, "reference_hz": 432.2, "corrected": true},
     "chords": [
       {"start": 0.51, "end": 3.79, "chord": "C", "root": "C", "quality": "maj", "bass": null,
        "notes": ["C", "E", "G"], "confidence": 0.62, "bar": 1, "beat": 1}
@@ -114,6 +115,8 @@ Field notes:
 - `chords[].bass` is set only for clear inversions, e.g. `C/E`.
 - `chords[].confidence` and `key.confidence` run from 0 to 1 and are relative indicators, not probabilities.
 - `notes[].pitch` is a MIDI note number (60 = middle C); `velocity` is the model's 0–1 strength for the note.
+- `tuning.cents` is how far the recording sits from concert pitch (negative = flat); `reference_hz` is the same thing as the frequency of its A. When the offset is 15 cents or more the audio is brought to pitch before analysis (`corrected`), so chords and notes are reported at the nearest standard pitch.
+- For a video upload, `source.video` is `true` and `links.audio` points to an MP3 of its soundtrack until `audio_expires_at`.
 - `cached` is `true` when this exact audio and settings had been analysed before; the request then returns in milliseconds.
 
 ## Fetch a transcription
@@ -143,7 +146,7 @@ Field notes:
 | `tempo` | no tempo mark and no "Tempo: … BPM" in the heading |
 | `key` | no "Key: …" in the heading (the key signature itself always stays) |
 
-Also: `transpose` (−11 to 11), `original=true` to ignore saved corrections, and `download=true` to add a `Content-Disposition: attachment` header. All of these are generated on request and take a few milliseconds. `midi` always contains the notes as detected.
+Also: `transpose` (−11 to 11), `capo=N` to print "Capo N" in the heading (see *Capo chords*), `original=true` to ignore saved corrections, and `download=true` to add a `Content-Disposition: attachment` header. All of these are generated on request and take a few milliseconds. `midi` always contains the notes as detected.
 
 MusicXML opens in MuseScore, Sibelius, Finale, Dorico, Logic and most other notation software, and renders in the browser with OpenSheetMusicDisplay. The website turns it into a PDF in the browser; the API does not produce PDFs.
 
@@ -186,11 +189,43 @@ Every finished transcription has a *score document*: plain JSON holding what is 
 `POST /v1/score/render` takes
 
 ```json
-{"document": {}, "arrangement": "piano", "transpose": 0, "musicxml": true, "chart": false,
+{"document": {}, "arrangement": "piano", "transpose": 0, "capo": 0, "musicxml": true, "chart": false,
  "show": {"notes": true, "chords": true, "lyrics": true, "tempo": true, "key": true}}
 ```
 
 and returns the validated `document`, its `view`, and the `musicxml` and/or `chart` text. This is what the website's editor calls after every change, so unsaved edits can be previewed and downloaded.
+
+### Capo chords
+
+`view.guitar` (from the score endpoints) is `null` when the chords are already comfortable on guitar, and otherwise suggests how a guitarist would play them:
+
+```json
+{"transpose": -1, "capo": 1, "tune_down": 0, "chords": ["Am", "G", "C"]}
+```
+
+Request anything with `transpose=-1&capo=1` to get those chords, with "Capo 1" printed in the heading of the sheet music and chord chart. `tune_down: 1` (with `transpose: 1`) means the shapes are easy on a guitar tuned a half step down.
+
+## Lyrics
+
+| Endpoint | |
+|---|---|
+| `GET /v1/transcriptions/{id}/lyrics` | What the lyrics provider found when the transcription was made |
+| `POST /v1/transcriptions/{id}/lyrics` | Look again under a corrected `title` and `artist` (form fields). Stored only when called by the creator |
+
+```json
+{"found": true, "source": "lrclib", "link": "https://lrclib.net", "title": "Let It Be", "artist": "The Beatles",
+ "synced": true, "aligned": true,
+ "lines": [{"time": 12.48, "text": "…"}],
+ "bars": {"3": "…", "4": "…"}}
+```
+
+`aligned` is `true` when the lyrics are timed and the analysed audio is the same full-length recording they were timed for. Then `bars` gives the words per bar (bar index from 0, as in the score document), and an unedited score already contains them. For a catalogue excerpt `aligned` is `false`: the lines are returned but cannot be placed. `{"found": false}` means nothing matched.
+
+To use your own licensed lyrics source, implement `LyricsProvider.find(title, artist, duration)` (`chordlistener/server/lyricsdb.py`) and pass it to `create_app(settings, lyrics=MyLyrics())`.
+
+## Converted audio
+
+`GET /v1/transcriptions/{id}/audio` returns the MP3 made from an uploaded video. It needs the API key that created the transcription, or its edit token as the `X-Edit-Token` header or a `token` query parameter. `404` once it has expired.
 
 ## Delete a transcription
 
@@ -238,7 +273,7 @@ Pass an instance to `create_app(settings, catalog=MyCatalog())`. Results are cac
 
 ## Health
 
-`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "1", "catalog": "itunes"}`
+`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "2", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000}`
 
 ## Errors
 
@@ -266,7 +301,8 @@ A failed analysis is also reported inside the transcription object: `"status": "
 
 | | Default |
 |---|---|
-| Upload size | 60 MB |
+| Upload size | 1000 MB |
+| Converted MP3 of a video upload | kept 120 minutes |
 | Audio length analysed | 15 minutes (longer files are cut, not rejected) |
 | Keyed requests | 60 per minute per key (set per key) |
 | Keyless requests | 30 analyses per hour per IP |

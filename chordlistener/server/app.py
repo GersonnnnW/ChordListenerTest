@@ -24,18 +24,20 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import ENGINE_VERSION, __version__, export
-from ..audio import AudioError
+from ..audio import SNIFF_BYTES, AudioError, looks_like_video, to_mp3
+from ..lyrics import Lyrics, can_place, guess_title_artist, place
 from ..pipeline import Analysis, AnalysisOptions, analyze
 from ..document import ARRANGEMENTS, DocumentError, ShowOptions, document_from_analysis, document_view, normalize_document
 from ..document import chord_chart as document_chart
 from ..theory import VOCABULARIES
 from .catalog import CatalogError, CatalogProvider, Track, make_provider
 from .config import Settings
+from .lyricsdb import LyricsProvider, make_lyrics_provider
 from .store import Store, hash_key
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
@@ -108,7 +110,7 @@ class Caller:
         return self.key is None
 
 
-def create_app(settings: Settings | None = None, catalog: CatalogProvider | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, catalog: CatalogProvider | None = None, lyrics: LyricsProvider | None = None) -> FastAPI:
     settings = settings or Settings()
     store = Store(settings.db_path)
     store.fail_interrupted()
@@ -117,6 +119,25 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
     executor = ThreadPoolExecutor(max_workers=max(1, settings.workers), thread_name_prefix="analysis")
     limiter = RateLimiter()
     provider = catalog if catalog is not None else make_provider(settings.catalog)
+    lyrics_provider = lyrics if lyrics is not None else make_lyrics_provider(settings.lyrics)
+    audio_dir = os.path.join(settings.data_dir, "audio")
+    os.makedirs(audio_dir, exist_ok=True)
+
+    def audio_path(tid: str) -> str:
+        return os.path.join(audio_dir, tid.replace("/", "_").replace(".", "_") + ".mp3")
+
+    def sweep_audio() -> None:
+        """Delete converted soundtracks that have outlived their welcome."""
+        limit = time.time() - settings.keep_audio_minutes * 60
+        for name in os.listdir(audio_dir):
+            full = os.path.join(audio_dir, name)
+            try:
+                if os.path.getmtime(full) < limit:
+                    os.unlink(full)
+            except OSError:
+                pass
+
+    sweep_audio()
     running: dict[tuple[str, str], asyncio.Future] = {}  # identical uploads in flight share one analysis
     tasks: set[asyncio.Task] = set()
 
@@ -124,9 +145,10 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
     async def lifespan(_: FastAPI):
         yield
         executor.shutdown(wait=False, cancel_futures=True)
-        close = getattr(provider, "close", None)
-        if close:
-            await close()
+        for closing in (provider, lyrics_provider):
+            close = getattr(closing, "close", None)
+            if close:
+                await close()
         store.close()
 
     app = FastAPI(
@@ -220,8 +242,52 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         elif row["status"] == "completed":
             body["result"] = load(row).to_dict(transpose=transpose, include_notes=notes)
             base = f"/v1/transcriptions/{row['id']}"
-            body["links"] = {"self": base, "score": base + "/score", "musicxml": base + "/musicxml", "midi": base + "/midi", "chart": base + "/chart"}
+            body["links"] = {"self": base, "score": base + "/score", "musicxml": base + "/musicxml", "midi": base + "/midi", "chart": base + "/chart", "lyrics": base + "/lyrics"}
+            if row["audio_until"] and row["audio_until"] > time.time() and os.path.exists(audio_path(row["id"])):
+                body["links"]["audio"] = base + "/audio"
+                body["audio_expires_at"] = _iso(row["audio_until"])
         return body
+
+    # ---- Lyrics -----------------------------------------------------------
+
+    def stored_lyrics(row) -> Lyrics | None:
+        return Lyrics.from_record(json.loads(row["lyrics"])) if row["lyrics"] else None
+
+    def lyrics_fit(row, found: Lyrics | None) -> bool:
+        """Timed lyrics can go under the bars only when the audio is the whole track they were timed for."""
+        seconds = json.loads(row["meta"]).get("audio_seconds") or 0
+        return found is not None and can_place(found, seconds)
+
+    def describe_lyrics(row, found: Lyrics | None, doc: dict | None = None) -> dict:
+        if found is None:
+            return {"found": False, "provider": lyrics_provider.name if lyrics_provider else None}
+        aligned = lyrics_fit(row, found)
+        out = {
+            "found": True,
+            "source": found.source,
+            "link": found.link,
+            "title": found.title,
+            "artist": found.artist,
+            "synced": found.synced,
+            "aligned": aligned,
+            "lines": [{"time": t, "text": text} for t, text in found.lines],
+        }
+        if aligned and doc is not None:
+            out["bars"] = place(found.lines, doc["beats"], doc["beats_per_bar"])
+        return out
+
+    async def look_up_lyrics(meta: dict, seconds: float | None) -> Lyrics | None:
+        if lyrics_provider is None:
+            return None
+        title, artist = guess_title_artist(meta.get("title", ""), meta.get("artist", ""), meta.get("filename", ""))
+        if not title:
+            return None
+        # For a catalogue track the timings belong to the full song, not the excerpt we were given.
+        length = meta.get("duration") if meta.get("type") == "catalog" else seconds
+        try:
+            return await asyncio.wait_for(lyrics_provider.find(title, artist, length), timeout=8)
+        except Exception:  # noqa: BLE001 - lyrics are a bonus; never fail a transcription over them
+            return None
 
     # ---- The editable score -----------------------------------------------
 
@@ -231,7 +297,11 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         if saved is not None:
             return saved, True
         meta = json.loads(row["meta"])
-        return normalize_document(document_from_analysis(load(row), _title(meta)[:200], meta.get("artist", "")[:200])), False
+        doc = document_from_analysis(load(row), _title(meta)[:200], meta.get("artist", "")[:200])
+        found = stored_lyrics(row)
+        if lyrics_fit(row, found):
+            doc["lyrics"] = place(found.lines, doc["beats"], doc["beats_per_bar"])
+        return normalize_document(doc), False
 
     def may_save(row, who: Caller, request: Request) -> bool:
         if row["owner"] != PUBLIC:
@@ -250,8 +320,8 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         except ValueError as exc:
             raise HTTPException(400, "The request body is not valid JSON") from exc
 
-    def show_options(notes: bool, chords: bool, lyrics: bool, tempo: bool, key: bool) -> ShowOptions:
-        return ShowOptions(notes=notes, chords=chords, lyrics=lyrics, tempo=tempo, key=key)
+    def show_options(notes: bool, chords: bool, lyrics: bool, tempo: bool, key: bool, capo: int = 0) -> ShowOptions:
+        return ShowOptions(notes=notes, chords=chords, lyrics=lyrics, tempo=tempo, key=key, capo=capo)
 
     # ---- Running an analysis ----------------------------------------------
 
@@ -278,6 +348,15 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
                 seconds, was_cached = await asyncio.shield(future), False
             meta["audio_seconds"] = round(seconds, 2)
             meta["options"] = {"vocabulary": options.vocabulary, "beats_per_bar": options.beats_per_bar, "tempo": next(k for k, v in TEMPO_SCALES.items() if v == options.tempo_scale)}
+            if meta.get("video") and path and settings.keep_audio_minutes > 0:
+                # Browsers cannot play every video format, so hand back an MP3 of the soundtrack to play along with.
+                try:
+                    await asyncio.get_running_loop().run_in_executor(executor, to_mp3, path, audio_path(tid), settings.max_seconds)
+                    store.set_audio_until(tid, time.time() + settings.keep_audio_minutes * 60)
+                except (AudioError, OSError):
+                    pass
+            found = await look_up_lyrics(meta, seconds)
+            store.set_lyrics(tid, found.to_record() if found else None)
             store.finish_transcription(tid, content_hash, was_cached, meta)
             if not who.is_public:
                 store.record_usage(who.owner, tid, seconds, was_cached)
@@ -288,7 +367,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         finally:
             if path:
                 try:
-                    os.unlink(path)  # audio is never kept after analysis
+                    os.unlink(path)  # the upload itself is never kept after analysis
                 except OSError:
                     pass
 
@@ -322,12 +401,19 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
 
     @app.get("/v1/health", tags=["Service"])
     async def health():
-        return {"status": "ok", "version": __version__, "engine_version": ENGINE_VERSION, "catalog": provider.name if provider else None}
+        return {
+            "status": "ok",
+            "version": __version__,
+            "engine_version": ENGINE_VERSION,
+            "catalog": provider.name if provider else None,
+            "lyrics": lyrics_provider.name if lyrics_provider else None,
+            "max_upload_mb": settings.max_upload_mb,
+        }
 
     @app.post("/v1/transcriptions", tags=["Transcriptions"], summary="Analyse an audio file or a catalogue track")
     async def create_transcription(
         who: Caller = Depends(caller),
-        file: UploadFile | None = File(None, description="Audio file: MP3, WAV, M4A, FLAC, OGG, AIFF or WebM"),
+        file: UploadFile | None = File(None, description="Audio (MP3, WAV, M4A, FLAC, OGG, AIFF) or video (MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG): a video's soundtrack is used"),
         track_id: str | None = Form(None, description="Catalogue track ID from /v1/songs/search (instead of a file)"),
         vocabulary: str = Form("standard", description="Chord detail: basic (major/minor), standard (adds 7ths, sus, dim, aug) or full"),
         beats_per_bar: int | None = Form(None, description="Force 3 or 4 beats per bar instead of detecting it"),
@@ -344,12 +430,21 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         try:
             if file is not None:
                 digest = hashlib.sha256()
+                head = b""
                 with os.fdopen(fd, "wb") as out:
                     while chunk := await file.read(1 << 20):
+                        if len(head) < SNIFF_BYTES:
+                            head += chunk[: SNIFF_BYTES - len(head)]
                         digest.update(chunk)
                         out.write(chunk)
                 content_hash = digest.hexdigest()
-                meta = {"type": "upload", "filename": (file.filename or "")[:200], "title": title, "artist": artist}
+                filename = (file.filename or "")[:200]
+                # "Queen - Bohemian Rhapsody (Official Video).mp4" -> title and artist
+                clean_title, clean_artist = guess_title_artist(title, artist, filename)
+                meta = {"type": "upload", "filename": filename, "title": clean_title[:200], "artist": clean_artist[:200]}
+                if looks_like_video(filename, file.content_type or "", head):
+                    meta["video"] = True
+                sweep_audio()
             else:
                 os.close(fd)
                 if provider is None:
@@ -391,12 +486,13 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         lyrics: bool = Query(True, description="Print lyrics, if any have been added"),
         tempo: bool = Query(True, description="Print the tempo"),
         key: bool = Query(True, description="Print the key as text (the key signature is always there)"),
+        capo: int = Query(0, ge=0, le=11, description="Print 'Capo N' in the heading (use with a negative transpose)"),
         original: bool = Query(False, description="Ignore saved corrections"),
         download: bool = False,
     ):
         row = owned(tid, who)
         doc, _ = current_document(row, original)
-        xml = export.musicxml_from_document(doc, arrangement, transpose, show_options(notes, chords, lyrics, tempo, key))
+        xml = export.musicxml_from_document(doc, arrangement, transpose, show_options(notes, chords, lyrics, tempo, key, capo))
         return Response(xml, media_type="application/vnd.recordare.musicxml+xml", headers=_attachment(json.loads(row["meta"]), f"{arrangement}.musicxml", download))
 
     @app.get("/v1/transcriptions/{tid}/midi", tags=["Transcriptions"], summary="Detected notes as a MIDI file")
@@ -413,12 +509,13 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         lyrics: bool = True,
         tempo: bool = True,
         key: bool = True,
+        capo: int = Query(0, ge=0, le=11),
         original: bool = Query(False, description="Ignore saved corrections"),
         download: bool = False,
     ):
         row = owned(tid, who)
         doc, _ = current_document(row, original)
-        text = document_chart(doc, transpose, show=show_options(True, chords, lyrics, tempo, key))
+        text = document_chart(doc, transpose, show=show_options(True, chords, lyrics, tempo, key, capo))
         return PlainTextResponse(text, headers=_attachment(json.loads(row["meta"]), "chords.txt", download))
 
     @app.get("/v1/transcriptions/{tid}/score", tags=["Scores"], summary="The editable score")
@@ -448,6 +545,35 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         store.delete_score(row["id"])
         return Response(status_code=204)
 
+    @app.get("/v1/transcriptions/{tid}/lyrics", tags=["Lyrics"], summary="Lyrics found for this song")
+    async def get_lyrics(tid: str, who: Caller = Depends(caller)):
+        row = owned(tid, who)
+        return describe_lyrics(row, stored_lyrics(row), current_document(row, original=True)[0])
+
+    @app.post("/v1/transcriptions/{tid}/lyrics", tags=["Lyrics"], summary="Look lyrics up again under a corrected title or artist")
+    async def find_lyrics(tid: str, request: Request, who: Caller = Depends(caller), title: str = Form(..., min_length=1, max_length=200), artist: str = Form("", max_length=200)):
+        row = owned(tid, who)
+        load(row)
+        ok, retry = limiter.allow(("lyrics:ip:" + who.ip) if who.is_public else ("lyrics:key:" + who.owner), 30, 60)
+        if not ok:
+            raise HTTPException(429, "Too many lyric searches. Please slow down.", headers={"Retry-After": str(retry)})
+        meta = {**json.loads(row["meta"]), "title": title, "artist": artist, "filename": ""}
+        found = await look_up_lyrics(meta, meta.get("audio_seconds"))
+        if found is not None and may_save(row, who, request):
+            store.set_lyrics(row["id"], found.to_record())
+        return describe_lyrics(row, found, current_document(row, original=True)[0])
+
+    @app.get("/v1/transcriptions/{tid}/audio", tags=["Transcriptions"], summary="MP3 of an uploaded video's soundtrack (kept for a limited time)")
+    async def get_audio(tid: str, request: Request, who: Caller = Depends(caller), token: str = Query("", description="Edit token, for players that cannot send headers")):
+        row = owned(tid, who)
+        allowed = may_save(row, who, request) or (bool(token) and bool(row["edit_hash"]) and secrets.compare_digest(hash_key(token), row["edit_hash"]))
+        if not allowed:
+            raise HTTPException(403, "Only the person who uploaded this can fetch its audio")
+        path = audio_path(row["id"])
+        if not row["audio_until"] or row["audio_until"] < time.time() or not os.path.exists(path):
+            raise HTTPException(404, "The converted audio is no longer available")
+        return FileResponse(path, media_type="audio/mpeg", filename=(_title(json.loads(row["meta"])) or "audio") + ".mp3", headers={"Cache-Control": "private, max-age=600"})
+
     @app.post("/v1/score/render", tags=["Scores"], summary="Render a score document without saving it")
     async def render_score(request: Request, who: Caller = Depends(caller)):
         """Body: {"document": {...}, "arrangement": "piano", "transpose": 0, "musicxml": true, "chart": false,
@@ -461,9 +587,12 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         arrangement = body.get("arrangement", "piano")
         transpose = body.get("transpose", 0)
         flags = body.get("show") or {}
+        capo = body.get("capo", 0)
         if arrangement not in ARRANGEMENTS or isinstance(transpose, bool) or not isinstance(transpose, int) or not -11 <= transpose <= 11 or not isinstance(flags, dict):
             raise HTTPException(400, "Invalid arrangement, transpose or show options")
-        show = ShowOptions(**{name: flags.get(name, True) is not False for name in ("notes", "chords", "lyrics", "tempo", "key")})
+        if isinstance(capo, bool) or not isinstance(capo, int) or not 0 <= capo <= 11:
+            raise HTTPException(400, "capo must be a whole number from 0 to 11")
+        show = ShowOptions(capo=capo, **{name: flags.get(name, True) is not False for name in ("notes", "chords", "lyrics", "tempo", "key")})
         try:
             doc = normalize_document(body.get("document"))
             out = {"document": doc, "view": document_view(doc, transpose)}
@@ -477,7 +606,9 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
 
     @app.delete("/v1/transcriptions/{tid}", status_code=204, tags=["Transcriptions"], summary="Delete a transcription")
     async def delete_transcription(tid: str, who: Caller = Depends(caller)):
-        store.delete_transcription(owned(tid, who)["id"])
+        row = owned(tid, who)
+        _unlink(audio_path(row["id"]))
+        store.delete_transcription(row["id"])
         return Response(status_code=204)
 
     @app.get("/v1/songs/search", tags=["Songs"], summary="Find a song by name")

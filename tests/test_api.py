@@ -6,7 +6,9 @@ from fastapi.testclient import TestClient
 
 from chordlistener.server.app import create_app
 from chordlistener.server.catalog import CatalogProvider, Track
+from chordlistener.lyrics import Lyrics
 from chordlistener.server.config import Settings
+from chordlistener.server.lyricsdb import LyricsProvider
 
 
 class FakeCatalog(CatalogProvider):
@@ -32,11 +34,30 @@ class FakeCatalog(CatalogProvider):
             return hashlib.sha256(fh.read()).hexdigest()
 
 
+class FakeLyrics(LyricsProvider):
+    """Stands in for the lyrics database: knows one song, timed for whatever length is asked about."""
+
+    name = "fake"
+
+    def __init__(self):
+        self.asked = []
+
+    async def find(self, title, artist, duration=None):
+        self.asked.append((title, artist, duration))
+        if "song" not in title.lower():
+            return None
+        lines = [(1.0, "first line of words"), (6.0, "second line here"), (11.0, "and a third")]
+        return Lyrics(lines, "fake", title, artist, duration if duration is not None else 200.0)
+
+
 def make_client(tmp_path, wav_path, **overrides):
+    overrides.setdefault("lyrics", "none")  # never reach for the real lyrics database from a test
     settings = Settings(data_dir=str(tmp_path / "data"), **overrides)
     catalog = FakeCatalog(wav_path)
-    app = create_app(settings, catalog)
+    lyrics = FakeLyrics()
+    app = create_app(settings, catalog, lyrics if overrides["lyrics"] == "fake" else None)
     client = TestClient(app)
+    client.lyrics = lyrics
     client.catalog = catalog
     client.store = app.state.store
     return client
@@ -284,3 +305,97 @@ def test_ad_spaces_are_off_unless_enabled(tmp_path, wav_path):
         assert 'class="ads-on"' in page.text and "/static/ads.js" in page.text
         assert "frame-src https://ads.example" in page.headers["content-security-policy"]
         assert client.get("/static/ads.js").status_code == 200
+
+
+# ---- Lyrics, video uploads, capo --------------------------------------------
+
+
+def test_lyrics_are_found_and_placed_for_a_full_track(tmp_path, wav_path):
+    with make_client(tmp_path, wav_path, lyrics="fake") as client:
+        with open(wav_path, "rb") as fh:
+            body = client.post("/v1/transcriptions", files={"file": ("The Band - My Song (Official Video).wav", fh, "audio/wav")}).json()
+        tid, token = body["id"], {"X-Edit-Token": body["edit_token"]}
+        assert (body["source"]["title"], body["source"]["artist"]) == ("My Song", "The Band")
+        title, artist, duration = client.lyrics.asked[-1]
+        assert (title, artist) == ("My Song", "The Band") and abs(duration - body["source"]["audio_seconds"]) < 0.01
+
+        found = client.get(f"/v1/transcriptions/{tid}/lyrics").json()
+        assert found["found"] and found["aligned"] and found["synced"]
+        assert [line["text"] for line in found["lines"]][0] == "first line of words"
+        doc = client.get(f"/v1/transcriptions/{tid}/score").json()["document"]
+        assert doc["lyrics"] == found["bars"] and "first" in doc["lyrics"]["0"]
+        sung = " ".join(doc["lyrics"][bar] for bar in sorted(doc["lyrics"], key=int))
+        assert sung == "first line of words second line here and a third"  # every word, in order
+        assert "<text>first</text>" in client.get(f"/v1/transcriptions/{tid}/musicxml").text
+
+        # Looking again under another name replaces what is stored only for the creator.
+        assert client.post(f"/v1/transcriptions/{tid}/lyrics", data={"title": "Unknown tune"}, headers=token).json()["found"] is False
+        assert client.get(f"/v1/transcriptions/{tid}/lyrics").json()["found"] is True
+        assert client.post(f"/v1/transcriptions/{tid}/lyrics", data={"title": "Other song", "artist": "X"}).json()["title"] == "Other song"
+        assert client.get(f"/v1/transcriptions/{tid}/lyrics").json()["title"] == "My Song"
+
+
+def test_lyrics_for_an_excerpt_are_shown_but_not_placed(tmp_path, wav_path):
+    with make_client(tmp_path, wav_path, lyrics="fake") as client:
+        tid = client.post("/v1/transcriptions", data={"track_id": "42"}).json()["id"]
+        found = client.get(f"/v1/transcriptions/{tid}/lyrics").json()
+        assert found["found"] is True and found["aligned"] is False and "bars" not in found
+        assert client.get(f"/v1/transcriptions/{tid}/score").json()["document"]["lyrics"] == {}
+
+
+def test_no_lyrics_provider(client, wav_path):
+    tid, _ = created(client, wav_path)
+    assert client.get(f"/v1/transcriptions/{tid}/lyrics").json() == {"found": False, "provider": None}
+    assert client.get("/v1/health").json()["lyrics"] is None
+
+
+def test_video_upload_is_converted(client, wav_path, tmp_path):
+    import shutil
+    import subprocess
+
+    video = str(tmp_path / "clip.avi")
+    made = subprocess.run(
+        [shutil.which("ffmpeg"), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x48:r=5", "-i", wav_path, "-shortest", "-c:v", "mpeg4", "-c:a", "libmp3lame", video],
+        capture_output=True,
+    )
+    if made.returncode != 0:
+        pytest.skip("this ffmpeg build cannot make a test video")
+    with open(video, "rb") as fh:
+        response = client.post("/v1/transcriptions", files={"file": ("Holiday clip.avi", fh, "video/x-msvideo")})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"]["video"] is True
+    assert [c["chord"] for c in body["result"]["chords"]][:4] == ["C", "G", "Am", "F"]  # same music as the audio-only test
+    tid, token = body["id"], body["edit_token"]
+    audio = client.get(body["links"]["audio"], params={"token": token})
+    assert audio.status_code == 200 and audio.headers["content-type"] == "audio/mpeg" and len(audio.content) > 20_000
+    assert client.get(body["links"]["audio"], headers={"X-Edit-Token": token}).status_code == 200
+    assert client.get(body["links"]["audio"]).status_code == 403  # the link alone is not enough
+    assert client.delete(f"/v1/transcriptions/{tid}").status_code == 204
+    assert client.get(body["links"]["audio"], params={"token": token}).status_code == 404
+
+
+def test_audio_uploads_keep_no_copy(client, wav_path):
+    body = upload(client, wav_path).json()
+    assert "audio" not in body["links"] and "video" not in body["source"]
+    assert client.get(f"/v1/transcriptions/{body['id']}/audio", params={"token": body["edit_token"]}).status_code == 404
+
+
+def test_capo_and_guitar_tip(client, wav_path):
+    tid, _ = created(client, wav_path)
+    score = client.get(f"/v1/transcriptions/{tid}/score").json()
+    assert score["view"]["guitar"] is None  # C G Am F needs no help
+    doc = score["document"]
+    doc["chords"] = [[0, "Bbm"], [4, "Ab"], [8, "Db"]]
+    doc["key"] = {"tonic": 1, "minor": False}
+    out = client.post("/v1/score/render", json={"document": doc, "transpose": -1, "capo": 1, "chart": True}).json()
+    assert out["view"]["guitar"] == {"transpose": -1, "capo": 1, "tune_down": 0, "chords": ["Am", "G", "C"]}
+    assert [c["chord"] for c in out["view"]["chords"]] == ["Am", "G", "C"]
+    assert "Capo 1" in out["musicxml"] and "Capo 1" in out["chart"]
+    assert client.post("/v1/score/render", json={"document": doc, "capo": 40}).status_code == 400
+    assert "Capo 2" in client.get(f"/v1/transcriptions/{tid}/musicxml", params={"transpose": -2, "capo": 2}).text
+
+
+def test_health_reports_limits(client):
+    health = client.get("/v1/health").json()
+    assert health["max_upload_mb"] == 1000 and health["engine_version"] == "2"

@@ -1,6 +1,6 @@
 # ChordListener
 
-Give it a song — an audio file, or just the song's name — and get back:
+Give it a song — an audio or video file, or just the song's name — and get back:
 
 - the **chords**, with timings, bar and beat positions
 - the **individual notes** (polyphonic transcription)
@@ -19,13 +19,15 @@ It ships as three things built on one engine:
 
 No large language model is involved, so **analysing a song costs zero AI tokens**. The pipeline is signal processing plus one very small neural network (about 17,000 parameters, 230 KB) that runs on an ordinary CPU:
 
-1. **Decode** the audio to mono 22 kHz (ffmpeg).
+1. **Decode** the audio to mono 22 kHz (ffmpeg). Video files work too: the soundtrack is extracted.
+1. **Tuning check** — measure how far the recording sits from concert pitch (A = 440 Hz). Old tape transfers and bands that tune to each other can be a third of a semitone off, which blurs every note across two piano keys; if so the audio is brought to pitch before analysis.
 2. **Pitch model** — one pass of Spotify's open-source Basic Pitch network gives, for every 11 ms frame, which of the 88 piano keys are sounding and where notes start. That single pass feeds everything below.
 3. **Notes** are decoded from those activations.
 4. **Beats** — tempo from the autocorrelation of an onset-strength curve, then a dynamic-programming beat tracker; bar lines are placed where the harmony changes and the bass lands.
 5. **Chords** — pitch activations are folded into a 12-note profile per beat, matched against chord templates, and decoded over the whole song with a Viterbi pass that knows chords tend to change on bar lines.
 6. **Key** — from the pitch distribution and the chord progression together (which is what separates G major from E minor).
-7. **Notation** — notes are snapped to a sixteenth-note grid, split into bars with ties and rests, spelled according to the key, and written as MusicXML.
+7. **Arrangement** — decide what belongs on the page. The tune is tracked as one smooth line (strong notes, on top, without wild leaps) and kept at the top of the right hand; other right-hand notes must agree with the detected chord; overtones ringing above played notes are dropped; the left hand moves in eighths; and sixteenths are only used when the music really has them.
+8. **Notation** — the result is split into bars with ties and rests, spelled according to the key, and written as MusicXML.
 
 Measured on a 4-core cloud VM, no GPU:
 
@@ -83,9 +85,19 @@ docker run -p 8000:8000 -v chordlistener-data:/data chordlistener
   - **Save** stores the corrected version; **Reset to original** brings back the automatic one. Undo and redo cover the last 60 changes.
 - **Download** — a PDF with a choice of what goes in it: the notes, chords, lyrics, key and tempo, each on or off, as a piano score or a lead sheet. MusicXML, MIDI, a text chord chart and JSON are also offered.
 
+- **Guitar tip** — when the sounding chords are awkward on guitar (Bbm, Ab, Db…), the page suggests the capo position that turns them into easy shapes (capo 1: Am, G, C) and shows those chords with one click. This is usually why chords "look wrong" next to a chord sheet: sheets are written for the capo, the recording sounds a few semitones higher.
+- **Tuning** — if the recording is not at concert pitch, the page says so (for example "A = 432 Hz").
+- **Video uploads** — MP4, MOV, MKV, WebM, AVI, WMV, FLV and MPEG files are accepted directly, up to 1 GB by default, with an upload progress bar. The soundtrack is converted to MP3 on the server, used for playback when the browser cannot play the video itself, and offered as a download.
+
 Who can save: the browser that created a transcription holds a private edit token for it, so a link can be shared without others overwriting the work. Anyone opening the link can still edit their own copy on the page and download it.
 
-Lyrics are entered by people, not detected. There is no reliable way to transcribe sung words from a full mix at this speed and cost, and fetching lyrics from the internet would mean publishing copyrighted text without a licence.
+**Lyrics** are looked up by title and artist in LRCLIB, a free community lyrics database that also has line timings:
+
+- For a **full-length upload** whose title, artist and length match a database entry, the lines are placed under the bars where they are sung, and appear on the chord chart, the sheet music and the PDF. The title and artist are read from the file name ("Artist - Title.mp3").
+- For a **song found by name**, only a 30-second excerpt is analysed, and there is no way to know which lines fall in it. The full lyrics are shown as text under the chords instead.
+- If nothing is found, or it is the wrong cut, fix the title and artist in Edit and press **Find lyrics**, or paste the words in.
+
+When only a file name is known, a match is accepted only if the title is identical and the recording length is the same to within a few seconds, because showing the wrong song's words is worse than showing none. Lyrics are not transcribed from the singing: doing that reliably on a full mix needs a large speech model, which would cost far more time and compute than everything else here combined.
 
 PDFs are produced in the visitor's browser, so they cost the server nothing.
 
@@ -163,7 +175,9 @@ All settings are environment variables.
 | `CL_DATA_DIR` | `./data` | Where the SQLite database lives |
 | `CL_PUBLIC_ACCESS` | `true` | Allow requests without an API key (the public website). Set `false` for a keys-only API |
 | `CL_PUBLIC_PER_HOUR` | `30` | Analyses per hour per IP address for keyless callers |
-| `CL_MAX_UPLOAD_MB` | `60` | Largest accepted upload |
+| `CL_MAX_UPLOAD_MB` | `1000` | Largest accepted upload (videos are big). A reverse proxy in front has its own limit, e.g. nginx `client_max_body_size` |
+| `CL_KEEP_AUDIO_MINUTES` | `120` | How long the MP3 made from an uploaded video is kept for playback; `0` keeps none |
+| `CL_LYRICS` | `lrclib` | Lyrics provider; `none` disables lyric lookup |
 | `CL_MAX_SECONDS` | `900` | Longest audio analysed; anything beyond is cut off |
 | `CL_WORKERS` | `2` | Analyses running at the same time |
 | `CL_MODEL_THREADS` | all cores | CPU threads the pitch model may use per analysis |
@@ -176,7 +190,7 @@ All settings are environment variables.
 | `CL_RETENTION_DAYS` | `30` | Days results are kept; `0` keeps them forever |
 | `CL_WAIT_SECONDS` | `120` | How long a request is held open before it turns into a pollable job |
 
-Uploaded audio is written to a temporary file, analysed and deleted. Only the transcription is stored.
+Uploads are written to a temporary file, analysed and deleted. Only the transcription is stored, plus, for video uploads, an MP3 of the soundtrack that is deleted after `CL_KEEP_AUDIO_MINUTES` and can only be fetched by the uploader.
 
 ## Accuracy: what to expect
 
@@ -190,13 +204,14 @@ On a dozen real commercial recordings checked by hand against their known chords
 - **Chord colour is conservative.** Sevenths and suspended chords are only reported when clearly present, so some real 7ths come back as plain triads. `vocabulary=full` loosens this; `vocabulary=basic` forces major/minor only.
 - **Tempo can come out at half or double** the speed a musician would count (70 vs 140 bpm). The chords and timings are unaffected; the bar lengths and note values in the sheet music are. The website has ½× / 2× buttons and the API a `tempo` option to flip it.
 - **Dense or unusual material is harder**: heavily distorted guitars, songs built on drones or fast arpeggios, 6/8 and other meters beyond 3/4 and 4/4, rap, and anything without stable pitched instruments.
-- **Sheet music is a faithful sketch, not an engraver's edition.** The piano score writes down every detected note split across two staves; the lead sheet picks the top line as melody. Both usually need tidying, which is what the website's Edit mode is for.
+- **Sheet music is an arrangement, not a note-for-note transcript.** The right hand carries the tracked melody with chord-consistent notes under it, the left hand the bass. On generated test songs 80% of the written melody notes are correct (67% before the arranger) and 79% of all right-hand notes (77% before); in exchange it writes fewer notes, leaving out roughly a quarter of what was played. On real recordings there is no answer key to score against: the melody is usually recognisable but has slips. A low (typically male) vocal is written an octave up, as lead sheets do. The MIDI download still contains every detected note.
 
 ## Before you sell it: licences and rights
 
 This is not legal advice — treat it as a checklist to take to a lawyer.
 
 - **The code's dependencies allow commercial use.** The pitch model is Apache-2.0, the notation renderer BSD-3, the Python libraries MIT/BSD. Attribution notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and must ship with the product. ffmpeg is called as a separate program; check the licence of the build you distribute.
+- **Lyrics are copyrighted.** The built-in lookup uses LRCLIB, a volunteer-run database with no licence from publishers. That is fine for trying the feature; a commercial product that displays or prints lyrics needs a licensed provider (Musixmatch, LyricFind and similar), which plugs in through the one-method `LyricsProvider` interface in `chordlistener/server/lyricsdb.py`, or should run with `CL_LYRICS=none`.
 - **Search by name uses Apple's iTunes Search API and its 30-second previews.** That API is intended for promoting Apple's store, and its terms limit how previews may be used. It is fine for a demo; a commercial product should use a catalogue you have rights to, which is what the `CatalogProvider` interface is for. This is also why search by name analyses a 30-second clip: there is no legitimate free source of full-length commercial recordings. Full songs come from audio the user or the business customer supplies.
 - **Chords and sheet music of copyrighted songs are themselves subject to copyright.** A tool that transcribes a user's own upload for them is in a different position from a site that publishes transcriptions of famous songs; the second normally needs agreements with music publishers.
 - **This repository has no licence file**, which means all rights are reserved by its owner. Add the commercial licence terms you intend to sell under before giving anyone access.
@@ -221,6 +236,10 @@ chordlistener/
   chords.py     beat-synchronous chroma, chord templates, Viterbi decoding, key
   theory.py     note spelling, key signatures, chord vocabulary
   pipeline.py   ties the stages together; the Analysis result type
+  tuning.py     how far a recording is from concert pitch, and correcting it
+  arrange.py    which detected notes are written down: melody tracking, chord-aware filtering, grid choice
+  guitar.py     capo and tuning suggestions for easier chord shapes
+  lyrics.py     LRC parsing, title/artist guessing, placing timed lines into bars
   document.py   the editable score: built from an analysis, validated, corrected by people, laid out
   score.py      notation building blocks: bars, voices, ties, rests, lyric underlay
   musicxml.py   MusicXML writer
@@ -228,7 +247,7 @@ chordlistener/
   export.py     MusicXML / MIDI / chord chart from an Analysis
   cli.py        command line
   models/       the pitch model (ONNX) and its licence
-  server/       FastAPI app, SQLite store, catalogue providers, website
+  server/       FastAPI app, SQLite store, catalogue and lyrics providers, website
 tools/          test-song generator and accuracy evaluation
 tests/
 ```

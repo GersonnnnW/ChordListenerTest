@@ -84,8 +84,9 @@ class Store:
         self._db.executescript(_SCHEMA)
         # Databases created before corrections could be saved lack this column.
         columns = {row["name"] for row in self._db.execute("PRAGMA table_info(transcriptions)")}
-        if "edit_hash" not in columns:
-            self._db.execute("ALTER TABLE transcriptions ADD COLUMN edit_hash TEXT")
+        for column, kind in (("edit_hash", "TEXT"), ("lyrics", "TEXT"), ("audio_until", "REAL")):
+            if column not in columns:
+                self._db.execute(f"ALTER TABLE transcriptions ADD COLUMN {column} {kind}")
 
     def _run(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -157,6 +158,12 @@ class Store:
             "UPDATE transcriptions SET status = 'completed', finished_at = ?, content_hash = ?, cached = ? WHERE id = ?",
             (time.time(), content_hash, int(cached), tid),
         )
+
+    def set_lyrics(self, tid: str, lyrics: dict | None) -> None:
+        self._run("UPDATE transcriptions SET lyrics = ? WHERE id = ?", (json.dumps(lyrics) if lyrics else None, tid))
+
+    def set_audio_until(self, tid: str, until: float | None) -> None:
+        self._run("UPDATE transcriptions SET audio_until = ? WHERE id = ?", (until, tid))
 
     def fail_transcription(self, tid: str, error: str) -> None:
         self._run("UPDATE transcriptions SET status = 'failed', finished_at = ?, error = ? WHERE id = ?", (time.time(), error[:500], tid))
