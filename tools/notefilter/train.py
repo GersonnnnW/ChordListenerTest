@@ -1,6 +1,9 @@
 """Train the note filter and write chordlistener/models/notefilter.json.
 
-    python -m tools.notefilter.train DATA_DIR [--prefix=C] [--write]
+    python -m tools.notefilter.train DATA_DIR [--prefix=C] [--write] [--features=shipped] [--weight.guitar=4]
+
+--features=shipped   train on the same feature columns as the model that ships now
+--weight.NAME=W      how much each example of NAME (synthetic, guitar, voice, band) counts
 
 DATA_DIR holds the .npz files made by build_synth.py and real.py. Real piano
 recordings (SMD, non-commercial licence) are only ever used for testing, which
@@ -93,7 +96,7 @@ def before(s: dict) -> tuple[float, float, float]:
 
 
 def after(s: dict, chance: np.ndarray, drop_below: float, add_from: float) -> tuple[float, float, float]:
-    return score(s["y"], notefilter.decide(s["x"], chance, drop_below, add_from), int(s["n_ref"].sum()))
+    return score(s["y"], notefilter.decide(s.get("x_all", s["x"]), chance, drop_below, add_from), int(s["n_ref"].sum()))
 
 
 def tune(sets: dict, chance: dict) -> tuple[float, float]:
@@ -121,14 +124,28 @@ def main() -> None:
     warnings.filterwarnings("ignore")
     directory = sys.argv[1]
     prefix = next((a.split("=")[1] for a in sys.argv if a.startswith("--prefix=")), "C")
+    weights = dict(TRAIN)
+    for arg in sys.argv:
+        if arg.startswith("--weight."):
+            name, value = arg[len("--weight."):].split("=")
+            weights[f"{name} train"] = float(value)
+    feature_names = list(notefilter.FEATURES)
+    if "--features=shipped" in sys.argv:
+        with open(os.path.join(os.path.dirname(notefilter.__file__), "models", "notefilter.json")) as fh:
+            feature_names = json.load(fh)["features"]
+    use = [notefilter.FEATURES.index(f) for f in feature_names]
     sets = load(directory, prefix)
-    names = [n for n in TRAIN if n in sets]
+    for s in sets.values():
+        s["x_all"] = s["x"]  # decide() reads "passes_old" from the full rows
+        s["x"] = s["x"][:, use]
+    names = [n for n in weights if n in sets]
     x = np.concatenate([sets[n]["x"] for n in names])
     y = np.concatenate([sets[n]["y"] for n in names])
-    w = np.concatenate([np.full(len(sets[n]["y"]), TRAIN[n]) for n in names])
-    print(f"training on {len(y)} candidate notes ({int(y.sum())} real) from: {', '.join(names)}")
+    w = np.concatenate([np.full(len(sets[n]["y"]), weights[n]) for n in names])
+    print(f"training on {len(y)} candidate notes ({int(y.sum())} real) from: {', '.join(f'{n} x{weights[n]:g}' for n in names)}")
+    print(f"features: {len(feature_names)}")
 
-    spectral = [i for i, f in enumerate(notefilter.FEATURES) if f.startswith(("partial", "half", "rise"))]
+    spectral = [i for i, f in enumerate(feature_names) if f.startswith(("partial", "half", "rise"))]
     plain = [i for i in range(x.shape[1]) if i not in spectral]
 
     def trees(columns: list[int]):
@@ -155,7 +172,7 @@ def main() -> None:
 
     if "--write" in sys.argv:
         out = {
-            "features": notefilter.FEATURES,
+            "features": feature_names,
             "candidates": [notefilter.CANDIDATE_ONSET, notefilter.CANDIDATE_FRAME, notefilter.CANDIDATE_SECONDS],
             "mean": [round(float(v), 6) for v in scaler.mean_],
             "scale": [round(float(v), 6) for v in scaler.scale_],

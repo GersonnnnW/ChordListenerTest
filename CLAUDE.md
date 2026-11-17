@@ -27,6 +27,7 @@ Ceiling: the Basic Pitch detector itself finds only 85–95% of played notes, so
 ## Tried, did not help (don't repeat)
 - Wider local-context features (87 instead of 42) + 480 generated songs: better on generated songs, worse on real piano/voice. The note filter is at a plateau (real piano F≈0.81, guitar 0.84); more filter tuning gives ~1 point at most.
 - Resolving semitone clashes in chords: no measurable gain.
+- Guitar fine-tune (2026-11-17): retrained on the shipped 42 features with guitar counted 2×/4×/6× (`--features=shipped --weight.guitar=N`, 160 generated train songs). Best (4×) vs shipped filter F: guitar 0.845 vs 0.841, but voice 0.580 vs 0.610, unseen instruments 0.732 vs 0.752, piano 0.830 vs 0.833. Not shipped.
 
 ## Ideas not yet done
 Stronger (piano-specific) transcription model as an optional high-accuracy mode; vocal-specific handling; more full-band training data (full Slakh2100 is ~100 GB).
