@@ -213,6 +213,8 @@ On generated test songs with known answers (`python -m tools.evaluate`, 10 songs
 | Real piano recordings (never used in training) | 89% (was 78%) | 73% (was 52%) |
 | Real piano, **high-accuracy mode: piano** | **95%** | **93%** |
 | Real guitar recordings, players held out of training | 83% (was 72%) | 77% (was 56%) |
+| Real guitar, **high-accuracy mode: guitar** | 83.5% | 78% |
+| Unseen guitar parts (BabySlakh test songs), standard → **guitar mode** | 77% → **80%** | 80% → **80%** (F 0.78 → 0.80) |
 | Generated songs | 89% (was 62%) | 78% (was 55%) |
 | Generated songs, instruments held out of training | 77% (was 69%) | 75% (was 61%) |
 

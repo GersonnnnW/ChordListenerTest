@@ -22,14 +22,18 @@ GuitarSet https://zenodo.org/records/3371780 (annotation.zip, audio_mono-mic.zip
 
 ## Accuracy now (written piano score, right / played-notes-written)
 Standard: real piano 89% / 73% · real guitar 83% / 77% · generated 89% / 78%. Melody line 77–95% right. Chord roots 99%.
-High-accuracy mode (`accuracy=high`): real piano 95% / 93% (F 0.82 → 0.94). The piano model is used only when it agrees with the standard notes on ≥85% (piano.AGREEMENT); otherwise standard notes are kept (guitar/band unchanged). ~10× slower (3-min song ≈ 23 s on 4 cores). Evaluate: `python -m tools.evaluate_sheet --real DATASETS --accuracy high`.
+High-accuracy mode (`accuracy=piano|guitar`, `high` = piano), ~10× slower (3-min song ≈ 23 s on 4 cores). Evaluate: `python -m tools.evaluate_sheet --real DATASETS --accuracy piano`.
+- piano: real piano 95% / 93% (F 0.82 → 0.94). Used only when it agrees with the standard notes on ≥85% (highres.AGREEMENT); otherwise standard notes kept (guitar/band unchanged).
+- guitar (Riley's GAPS model, trained on classical guitar, MIT): alone it is NOT better than standard (GuitarSet F 0.775 vs 0.799). So it is combined (highres.combine: unsure standard notes need its confirmation, its sure notes are added): GuitarSet 0.799 → 0.807, unseen BabySlakh guitar stems 0.78 → 0.82 (only 6 stems), all 20 stems 0.728 → 0.742. Small gain only.
+- `guitar-gaps-paper-version-12200_iterations.pth` (same HF repo) scores 0.91–0.95 on all GuitarSet players: almost certainly trained on GuitarSet, so it can't be tested fairly here; on unseen BabySlakh guitar it was no better than guitar-gaps. Not used.
 Weakest: singing (~60%), dense full-band mixes.
 
 ## Tried, did not help (don't repeat)
 - Wider local-context features (87 instead of 42) + 480 generated songs: better on generated songs, worse on real piano/voice. The note filter is at a plateau (real piano F≈0.81, guitar 0.84); more filter tuning gives ~1 point at most.
 - Resolving semitone clashes in chords: no measurable gain.
 
+- Guitar model replacing the standard notes (any agreement threshold): worse on real steel-string guitar.
 - Piano model on its own for everything: much worse on guitar (F 0.80 → 0.52) and band songs (melody line collapses). Union of both detectors' notes: worse than either alone on guitar.
 
 ## Ideas not yet done
-Per-section (not per-song) choice of detector, for songs that are piano only in parts; a guitar- or vocal-specific model the same way; more full-band training data (full Slakh2100 is ~100 GB).
+Per-section (not per-song) choice of detector, for songs that are piano only in parts; a real guitar jump needs fine-tuning the guitar model on GuitarSet players 00–03 (needs a GPU), or retraining the note filter with the guitar model's activations as extra features (CPU is enough); a vocal-specific model; more full-band training data (full Slakh2100 is ~100 GB).
