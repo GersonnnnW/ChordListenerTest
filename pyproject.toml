@@ -22,6 +22,10 @@ server = [
 dev = [
     "pytest>=8",
 ]
+train = [
+    "scikit-learn>=1.4",
+    "pyyaml>=6",
+]
 
 [project.scripts]
 chordlistener = "chordlistener.cli:main"

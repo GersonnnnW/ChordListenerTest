@@ -28,6 +28,16 @@ Copyright (c) 2010-2025 James Hall, (c) 2015-2025 yWorks GmbH. Licence text: `ch
 `chordlistener/server/web/vendor/svg2pdf.umd.min.js` (version 2.9.0), from <https://github.com/yWorks/svg2pdf.js>.
 Copyright (c) 2015-2026 yWorks GmbH, (c) 2013-2015 Vitaly Puzrin. Licence text: `chordlistener/server/web/vendor/LICENSE-svg2pdf.txt`.
 
+### Training data for the note filter and melody models — CC BY 4.0
+
+`chordlistener/models/notefilter.json` and `chordlistener/models/melody.json` are original models, trained by this project on songs it generated itself and on these datasets:
+
+- **GuitarSet** — Q. Xi, R. Bittner, J. Pauwels, X. Ye, J. P. Bello, "GuitarSet: A Dataset for Guitar Transcription", ISMIR 2018. <https://zenodo.org/records/3371780>, CC BY 4.0.
+- **vocadito** — R. Bittner, K. Pasalo, J. J. Bosch, G. Meseguer-Brocal, D. Rubinstein, "vocadito: A dataset of solo vocals with f0, note, and lyric annotations", 2021. <https://zenodo.org/records/5578807>, CC BY 4.0.
+- **BabySlakh** — E. Manilow, G. Wichern, P. Seetharaman, J. Le Roux, "Cutting Music Source Separation Some Slakh", WASPAA 2019. <https://zenodo.org/records/4603870>, CC BY 4.0.
+
+The **Saarland Music Data (SMD)** piano recordings (CC BY-NC-SA 3.0) were used only to measure accuracy. They are not in the models or in this repository.
+
 ## Installed as dependencies
 
 | Package | Licence |
@@ -39,6 +49,7 @@ Copyright (c) 2015-2026 yWorks GmbH, (c) 2013-2015 Vitaly Puzrin. Licence text: 
 | Uvicorn | BSD 3-Clause |
 | python-multipart | Apache 2.0 |
 | HTTPX | BSD 3-Clause |
+| scikit-learn (training only, not shipped) | BSD 3-Clause |
 
 ## Used as an external program
 

@@ -22,18 +22,18 @@ No large language model is involved, so **analysing a song costs zero AI tokens*
 1. **Decode** the audio to mono 22 kHz (ffmpeg). Video files work too: the soundtrack is extracted.
 1. **Tuning check** — measure how far the recording sits from concert pitch (A = 440 Hz). Old tape transfers and bands that tune to each other can be a third of a semitone off, which blurs every note across two piano keys; if so the audio is brought to pitch before analysis.
 2. **Pitch model** — one pass of Spotify's open-source Basic Pitch network gives, for every 11 ms frame, which of the 88 piano keys are sounding and where notes start. That single pass feeds everything below.
-3. **Notes** are decoded from those activations.
+3. **Notes** — candidate notes are read from those activations generously, then a small trained **note filter** judges each one in context (what sounds an octave or a twelfth below it, whether the same key was already ringing, how it starts, what the audio spectrum shows at its partials). It removes overtones and drum hits mistaken for notes, and recovers quiet notes a fixed threshold would miss.
 4. **Beats** — tempo from the autocorrelation of an onset-strength curve, then a dynamic-programming beat tracker; bar lines are placed where the harmony changes and the bass lands.
 5. **Chords** — pitch activations are folded into a 12-note profile per beat, matched against chord templates, and decoded over the whole song with a Viterbi pass that knows chords tend to change on bar lines.
 6. **Key** — from the pitch distribution and the chord progression together (which is what separates G major from E minor).
-7. **Arrangement** — decide what belongs on the page. The tune is tracked as one smooth line (strong notes, on top, without wild leaps) and kept at the top of the right hand; other right-hand notes must agree with the detected chord; overtones ringing above played notes are dropped; the left hand moves in eighths; and sixteenths are only used when the music really has them.
+7. **Arrangement** — every trusted note is written, each given to a hand that can reach it (no hand stretches beyond a ninth or so; where a chord is too wide, only notes that double another an octave away are left out, so the harmony is kept). Sixteenths are only used when the music really has them. For the lead sheet a second trained model picks out the **tune**: it scores each note for being the melody, and a line-finder chooses one smooth, likely line through the song.
 8. **Notation** — the result is split into bars with ties and rests, spelled according to the key, and written as MusicXML.
 
 Measured on a 4-core cloud VM, no GPU:
 
 | | |
 |---|---|
-| Analysis speed | about **95× real time** — a 4-minute MP3 in about 2.5 seconds, decoding included |
+| Analysis speed | about **60× real time** — a 4-minute MP3 in about 4 seconds, decoding included |
 | 30-second preview clip, end to end | about **0.5 s** |
 | Same audio requested again | about **40 ms** (served from the result cache) |
 | Sheet music / MIDI / transposed versions of a finished analysis | a few ms each, generated on demand from the stored result |
@@ -196,7 +196,18 @@ Uploads are written to a temporary file, analysed and deleted. Only the transcri
 
 Automatic transcription is not perfect, and it is better to know where it is strong and weak.
 
-On generated test songs with known answers (`python -m tools.evaluate`, 10 songs across styles, keys and meters): chord roots 99%, exact chord 93%, key 10/10, meter 10/10, note F-score 0.74.
+On generated test songs with known answers (`python -m tools.evaluate`, 10 songs across styles, keys and meters): chord roots 99%, exact chord 92%, key 10/10, meter 10/10, note F-score 0.87.
+
+**Sheet music** (`python -m tools.evaluate_sheet --real DATA`), scored against what was actually played. "Right" is the share of written notes that were played; "written" is the share of played notes that appear on the page:
+
+| Piano score, both hands | Right | Written |
+|---|---|---|
+| Real piano recordings (never used in training) | 89% (was 78%) | 73% (was 52%) |
+| Real guitar recordings, players held out of training | 83% (was 72%) | 77% (was 56%) |
+| Generated songs | 89% (was 62%) | 78% (was 55%) |
+| Generated songs, instruments held out of training | 77% (was 69%) | 75% (was 61%) |
+
+The lead-sheet melody on generated songs: 77–95% of written notes are the tune, depending on the test set (was 53–80%), and 64–86% of the tune is written. Real-recording figures come from public research datasets with human-checked notes (piano: SMD; guitar: GuitarSet).
 
 On a dozen real commercial recordings checked by hand against their known chords:
 
@@ -204,7 +215,25 @@ On a dozen real commercial recordings checked by hand against their known chords
 - **Chord colour is conservative.** Sevenths and suspended chords are only reported when clearly present, so some real 7ths come back as plain triads. `vocabulary=full` loosens this; `vocabulary=basic` forces major/minor only.
 - **Tempo can come out at half or double** the speed a musician would count (70 vs 140 bpm). The chords and timings are unaffected; the bar lengths and note values in the sheet music are. The website has ½× / 2× buttons and the API a `tempo` option to flip it.
 - **Dense or unusual material is harder**: heavily distorted guitars, songs built on drones or fast arpeggios, 6/8 and other meters beyond 3/4 and 4/4, rap, and anything without stable pitched instruments.
-- **Sheet music is an arrangement, not a note-for-note transcript.** The right hand carries the tracked melody with chord-consistent notes under it, the left hand the bass. On generated test songs 80% of the written melody notes are correct (67% before the arranger) and 79% of all right-hand notes (77% before); in exchange it writes fewer notes, leaving out roughly a quarter of what was played. On real recordings there is no answer key to score against: the melody is usually recognisable but has slips. A low (typically male) vocal is written an octave up, as lead sheets do. The MIDI download still contains every detected note.
+- **Sheet music is close, not perfect.** Roughly one written note in ten is wrong and about a quarter of what was played is still missing, mostly fast inner notes and notes buried under louder ones. Expect a musician to correct a few notes per page (the website's Edit mode is for that). **Singing is the weakest part**: on solo-voice recordings only about 60% of detected notes are right, because voices slide and wobble between pitches; in full mixes this shows up as stray neighbouring notes in the right hand. A low (typically male) vocal is written an octave up on the lead sheet, as lead sheets do. The MIDI download contains every detected note.
+
+### Retraining the models
+
+Both models are small (under 100 KB together) and run in plain numpy. To rebuild them, install the training extras (`pip install -e ".[train]"`) plus FluidSynth and a General MIDI soundfont, download the datasets listed in `tools/notefilter/real.py`, and run, from the repository folder:
+
+```bash
+python -m tools.notefilter.build_synth DATA/C_train_0.npz 80 0
+```
+
+```bash
+python -m tools.notefilter.real DATA/C_real_0.npz DATASETS
+```
+
+```bash
+python -m tools.notefilter.train DATA --prefix=C --write
+```
+
+The melody model is trained with `python -m tools.notefilter.melody`. Real piano recordings (SMD) carry a non-commercial licence, so they are used only to test, never to train.
 
 ## Before you sell it: licences and rights
 
@@ -232,12 +261,14 @@ The tests need only ffmpeg; they synthesise their own audio. `tools.evaluate` us
 chordlistener/
   audio.py      decode with ffmpeg; reject anything that is not a real audio container
   pitch.py      pitch model inference and note decoding
+  notefilter.py the trained note filter: candidate notes, their features, which ones to keep
+  melody.py     the trained melody model and the line-finder for the lead sheet
   beats.py      onset strength, tempo, beat tracking, bar finding
   chords.py     beat-synchronous chroma, chord templates, Viterbi decoding, key
   theory.py     note spelling, key signatures, chord vocabulary
   pipeline.py   ties the stages together; the Analysis result type
   tuning.py     how far a recording is from concert pitch, and correcting it
-  arrange.py    which detected notes are written down: melody tracking, chord-aware filtering, grid choice
+  arrange.py    laying notes out for two hands within reach, grid choice, the lead-sheet line
   guitar.py     capo and tuning suggestions for easier chord shapes
   lyrics.py     LRC parsing, title/artist guessing, placing timed lines into bars
   document.py   the editable score: built from an analysis, validated, corrected by people, laid out
@@ -248,7 +279,7 @@ chordlistener/
   cli.py        command line
   models/       the pitch model (ONNX) and its licence
   server/       FastAPI app, SQLite store, catalogue and lyrics providers, website
-tools/          test-song generator and accuracy evaluation
+tools/          test-song generator, accuracy evaluation, and (tools/notefilter) the training of both models
 tests/
 ```
 
