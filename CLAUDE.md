@@ -35,5 +35,11 @@ Weakest: singing (~60%), dense full-band mixes.
 - Guitar model replacing the standard notes (any agreement threshold): worse on real steel-string guitar.
 - Piano model on its own for everything: much worse on guitar (F 0.80 → 0.52) and band songs (melody line collapses). Union of both detectors' notes: worse than either alone on guitar.
 
+## Guitar fine-tune on the owner's PC (RTX 3070) — ready, not yet run
+Cloud sessions have no GPU. On the PC, from the repo folder (Windows: `py -3.13` for `python`):
+1. `python -m pip install torch --index-url https://download.pytorch.org/whl/cu126` then `python -m pip install -e ".[server,finetune,dev]"`; check `python -c "import torch; print(torch.cuda.is_available())"` is True.
+2. `python -m tools.guitar_finetune` (downloads GuitarSet + starting model into ./finetune, ~0.5 h). Train players 00–02, stop on 03, report on 04–05 (the app's guitar test players; never train on them). If GPU memory runs out: `--batch 4`.
+3. If finetune/report.txt shows a clear test gain: copy finetune/guitar_finetuned.onnx over chordlistener/models/guitar.onnx, then re-measure the written score (`python -m tools.evaluate_sheet --real DATASETS --real-only --accuracy guitar`, DATASETS/guitarset can be ./finetune/guitarset) against 0.807. A model that is now better alone may beat the combination: try `highres._COMBINE.pop("guitar")` with AGREEMENT 0.5–0.85 too. Update NOTICE-guitar-transcription.txt (fine-tuned on GuitarSet, CC BY 4.0), README, this file; bump ENGINE_VERSION; commit + push.
+
 ## Ideas not yet done
 Per-section (not per-song) choice of detector, for songs that are piano only in parts; a real guitar jump needs fine-tuning the guitar model on GuitarSet players 00–03 (needs a GPU), or retraining the note filter with the guitar model's activations as extra features (CPU is enough); a vocal-specific model; more full-band training data (full Slakh2100 is ~100 GB).

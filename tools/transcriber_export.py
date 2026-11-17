@@ -22,26 +22,45 @@ from __future__ import annotations
 import sys
 
 
-def main(checkpoint: str, out: str) -> None:
-    import numpy as np
-    import onnx
-    import torch
-    from onnx import numpy_helper
-    from piano_transcription_inference.models import Regress_onset_offset_frame_velocity_CRNN
-
+def load_model(checkpoint: str):
+    """The PyTorch model from a checkpoint, read with the weights-only loader (a file cannot run code)."""
     import codecs
 
-    from numpy._core.multiarray import _reconstruct
+    import numpy as np
+    import torch
+    from piano_transcription_inference.models import Regress_onset_offset_frame_velocity_CRNN
+
+    try:
+        from numpy._core.multiarray import _reconstruct
+    except ImportError:  # numpy 1.x
+        from numpy.core.multiarray import _reconstruct
 
     # Some checkpoints carry numpy arrays (training-sampler state); allow just those types.
     numpy_types = [type(np.dtype(t)) for t in ("float32", "float64", "int64", "int32")]
     torch.serialization.add_safe_globals([(_reconstruct, "numpy.core.multiarray._reconstruct"), np.ndarray, np.dtype, codecs.encode, *numpy_types])
     full = Regress_onset_offset_frame_velocity_CRNN(frames_per_second=100, classes_num=88)
-    state = torch.load(checkpoint, map_location="cpu", weights_only=True)["model"]
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    state = state.get("model", state)
     state = state.get("note_model", state)
-    missing, unexpected = full.load_state_dict(state, strict=False)
+    missing, _ = full.load_state_dict(state, strict=False)
     assert not [k for k in missing if "spectrogram" not in k and "logmel" not in k], missing
-    full.eval()
+    return full
+
+
+def main(checkpoint: str, out: str) -> None:
+    export(load_model(checkpoint), out)
+
+
+def export(full, out: str) -> None:
+    """Write the model as ONNX with float16 weights; the spectrogram is left to chordlistener/highres.py."""
+    import os
+
+    import numpy as np
+    import onnx
+    import torch
+    from onnx import numpy_helper
+
+    full = full.to("cpu").float().eval()
     mel = full.logmel_extractor.melW.detach().clone()  # (1025, 229)
 
     class Net(torch.nn.Module):
@@ -91,8 +110,6 @@ def main(checkpoint: str, out: str) -> None:
         graph.node.insert(0, node)
     onnx.checker.check_model(model)
     onnx.save(model, out)
-    import os
-
     os.unlink(tmp)
     print(f"wrote {out} ({os.path.getsize(out) / 1e6:.1f} MB)")
 
