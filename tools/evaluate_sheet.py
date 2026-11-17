@@ -96,7 +96,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--real", help="directory with the real datasets (see tools/notefilter/real.py)")
     parser.add_argument("--songs", type=int, default=30)
-    parser.add_argument("--accuracy", choices=["standard", "high"], default="standard", help="high = the large piano model writes the notes")
+    parser.add_argument("--accuracy", choices=["standard", "piano", "guitar"], default="standard", help="piano / guitar = high-accuracy mode with that instrument's model")
     parser.add_argument("--real-only", action="store_true", help="skip the generated songs")
     args = parser.parse_args()
     OPTIONS.accuracy = args.accuracy

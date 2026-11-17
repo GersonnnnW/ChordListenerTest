@@ -1,12 +1,16 @@
-"""Convert the ByteDance high-resolution piano transcription model to ONNX.
+"""Convert a high-resolution transcription checkpoint (Kong et al.'s design) to ONNX.
 
-One-off, developer-only (needs PyTorch and torchlibrosa). The app itself runs the
-result with ONNX Runtime and never needs PyTorch.
+One-off, developer-only (needs PyTorch, torchlibrosa and piano_transcription_inference).
+The app itself runs the result with ONNX Runtime and never needs PyTorch.
 
     curl -L -o piano.pth "https://zenodo.org/api/records/4034264/files/CRNN_note_F1=0.9677_pedal_F1=0.9186.pth/content"
-    python -m tools.piano_export piano.pth chordlistener/models/piano.onnx
+    python -m tools.transcriber_export piano.pth chordlistener/models/piano.onnx
 
-Only the note part of the checkpoint is kept (the pedal model is dropped). The
+    curl -L -o guitar.pth "https://huggingface.co/xavriley/midi-transcription-models/resolve/main/guitar-gaps.pth"
+    python -m tools.transcriber_export guitar.pth chordlistener/models/guitar.onnx
+
+Checkpoints are read with PyTorch's weights-only loader, so a downloaded file
+cannot run code. Only the note part is kept (a pedal model is dropped). The
 spectrogram is computed outside the network (chordlistener/piano.py), so the
 graph takes a power spectrogram (batch, frames, 1025) and maps it to mel bands
 itself. Weights are stored as float16 and widened to float32 when the model
@@ -25,9 +29,18 @@ def main(checkpoint: str, out: str) -> None:
     from onnx import numpy_helper
     from piano_transcription_inference.models import Regress_onset_offset_frame_velocity_CRNN
 
+    import codecs
+
+    from numpy._core.multiarray import _reconstruct
+
+    # Some checkpoints carry numpy arrays (training-sampler state); allow just those types.
+    numpy_types = [type(np.dtype(t)) for t in ("float32", "float64", "int64", "int32")]
+    torch.serialization.add_safe_globals([(_reconstruct, "numpy.core.multiarray._reconstruct"), np.ndarray, np.dtype, codecs.encode, *numpy_types])
     full = Regress_onset_offset_frame_velocity_CRNN(frames_per_second=100, classes_num=88)
-    state = torch.load(checkpoint, map_location="cpu")["model"]
-    full.load_state_dict(state["note_model"], strict=False)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)["model"]
+    state = state.get("note_model", state)
+    missing, unexpected = full.load_state_dict(state, strict=False)
+    assert not [k for k in missing if "spectrogram" not in k and "logmel" not in k], missing
     full.eval()
     mel = full.logmel_extractor.melW.detach().clone()  # (1025, 229)
 

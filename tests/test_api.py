@@ -401,16 +401,16 @@ def test_health_reports_limits(client):
     assert health["max_upload_mb"] == 1000 and health["engine_version"] == "3"
 
 
-needs_piano = pytest.mark.skipif(not __import__("chordlistener.piano").piano.available(), reason="piano model not installed")
+needs_piano = pytest.mark.skipif(not __import__("chordlistener.highres").highres.available("piano"), reason="piano model not installed")
 
 
 @needs_piano
 def test_high_accuracy_upload_and_switching_back_and_forth(client, wav_path):
-    assert client.get("/v1/health").json()["high_accuracy"] is True
+    assert "piano" in client.get("/v1/health").json()["high_accuracy"]
     assert upload(client, wav_path, data={"accuracy": "extreme"}).status_code == 400
-    high = upload(client, wav_path, data={"accuracy": "high", "tempo": "half"}).json()
-    assert high["status"] == "completed" and high["result"]["accuracy"] == "high"
-    assert high["source"]["options"]["accuracy"] == "high"
+    high = upload(client, wav_path, data={"accuracy": "high", "tempo": "half"}).json()  # "high" is the earlier name for piano
+    assert high["status"] == "completed" and high["result"]["accuracy"] == "piano"
+    assert high["source"]["options"]["accuracy"] == "piano"
 
     # Back to standard for the same upload: the file is not kept, so it must be sent again ...
     tid = high["id"]
@@ -424,16 +424,16 @@ def test_high_accuracy_upload_and_switching_back_and_forth(client, wav_path):
     assert standard["source"]["options"] == {**high["source"]["options"], "accuracy": "standard"}  # other settings kept
     assert standard["edit_token"]
     # ... unless that mode's result is already cached.
-    again = client.post(f"/v1/transcriptions/{standard['id']}/reanalyze", data={"accuracy": "high"}).json()
-    assert again["cached"] is True and again["result"]["accuracy"] == "high"
+    again = client.post(f"/v1/transcriptions/{standard['id']}/reanalyze", data={"accuracy": "piano"}).json()
+    assert again["cached"] is True and again["result"]["accuracy"] == "piano"
 
 
 @needs_piano
 def test_a_song_found_by_name_can_be_switched_to_high_accuracy(client):
     body = client.post("/v1/transcriptions", data={"track_id": "42"}).json()
     assert body["result"]["accuracy"] == "standard"
-    high = client.post(f"/v1/transcriptions/{body['id']}/reanalyze").json()  # high is the default
-    assert high["status"] == "completed" and high["result"]["accuracy"] == "high"
+    high = client.post(f"/v1/transcriptions/{body['id']}/reanalyze").json()  # piano is the default
+    assert high["status"] == "completed" and high["result"]["accuracy"] == "piano"
     assert high["source"]["type"] == "catalog" and high["source"]["title"] == "Test Song"
     assert client.catalog.downloads == 2  # fetched again: the clip is never kept
     assert client.post("/v1/transcriptions/nope/reanalyze").status_code == 404
@@ -441,5 +441,6 @@ def test_a_song_found_by_name_can_be_switched_to_high_accuracy(client):
 
 def test_high_accuracy_can_be_switched_off(tmp_path, wav_path):
     with make_client(tmp_path, wav_path, high_accuracy=False) as c:
-        assert c.get("/v1/health").json()["high_accuracy"] is False
+        assert c.get("/v1/health").json()["high_accuracy"] == []
         assert upload(c, wav_path, data={"accuracy": "high"}).status_code == 400
+        assert upload(c, wav_path, data={"accuracy": "guitar"}).status_code == 400

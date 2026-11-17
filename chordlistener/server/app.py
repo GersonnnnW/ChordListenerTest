@@ -31,7 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .. import ENGINE_VERSION, __version__, export
 from ..audio import SNIFF_BYTES, AudioError, looks_like_video, to_mp3
 from ..lyrics import Lyrics, can_place, guess_title_artist, place
-from .. import piano
+from .. import highres
 from ..pipeline import Analysis, AnalysisOptions, analyze
 from ..document import ARRANGEMENTS, DocumentError, ShowOptions, document_from_analysis, document_view, normalize_document
 from ..document import chord_chart as document_chart
@@ -44,7 +44,7 @@ from .store import Store, hash_key
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 PUBLIC = "public"
 TEMPO_SCALES = {"auto": 1.0, "half": 0.5, "double": 2.0}
-ACCURACIES = ("standard", "high")
+ACCURACIES = ("standard", "piano", "guitar", "high")  # "high" = piano, its earlier name
 MAX_SCORE_BYTES = 4 * 1024 * 1024
 
 
@@ -390,13 +390,15 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
             body["edit_token"] = edit_token  # shown once; needed to save corrections without an API key
         return JSONResponse(body, status_code=status)
 
-    high_accuracy = settings.high_accuracy and piano.available()
+    specialists = highres.installed() if settings.high_accuracy else []
 
     def parse_options(vocabulary: str, beats_per_bar: int | None, tempo: str, accuracy: str = "standard") -> AnalysisOptions:
         if accuracy not in ACCURACIES:
             raise HTTPException(400, f"accuracy must be one of: {', '.join(ACCURACIES)}")
-        if accuracy == "high" and not high_accuracy:
-            raise HTTPException(400, "High-accuracy mode is not available on this server")
+        if accuracy == "high":
+            accuracy = "piano"
+        if accuracy != "standard" and accuracy not in specialists:
+            raise HTTPException(400, f"High-accuracy mode for {accuracy} is not available on this server")
         if vocabulary not in VOCABULARIES:
             raise HTTPException(400, f"vocabulary must be one of: {', '.join(VOCABULARIES)}")
         if beats_per_bar not in (None, 3, 4):
@@ -445,7 +447,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
             "catalog": provider.name if provider else None,
             "lyrics": lyrics_provider.name if lyrics_provider else None,
             "max_upload_mb": settings.max_upload_mb,
-            "high_accuracy": high_accuracy,
+            "high_accuracy": specialists,
         }
 
     @app.post("/v1/transcriptions", tags=["Transcriptions"], summary="Analyse an audio file or a catalogue track")
@@ -456,7 +458,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         vocabulary: str = Form("standard", description="Chord detail: basic (major/minor), standard (adds 7ths, sus, dim, aug) or full"),
         beats_per_bar: int | None = Form(None, description="Force 3 or 4 beats per bar instead of detecting it"),
         tempo: str = Form("auto", description="auto, or half / double to count the beat at half or twice the detected speed"),
-        accuracy: str = Form("standard", description="standard, or high: a large piano-specialised note detector writes the notes. Best for piano recordings; takes longer"),
+        accuracy: str = Form("standard", description="standard; or piano / guitar: high-accuracy mode, where a large detector specialised for that instrument writes the notes when the recording is that instrument. Takes about ten times longer. (high = piano)"),
         title: str = Form("", max_length=200),
         artist: str = Form("", max_length=200),
         wait: bool = Query(True, description="Hold the request until the result is ready (otherwise poll the returned ID)"),
@@ -489,7 +491,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
     async def reanalyze(
         tid: str,
         who: Caller = Depends(caller),
-        accuracy: str = Form("high", description="standard or high"),
+        accuracy: str = Form("piano", description="standard, piano or guitar (high = piano)"),
         file: UploadFile | None = File(None, description="The same file again. Needed only for an uploaded file whose result in this mode is not cached: uploads are never kept"),
         wait: bool = Query(True, description="Hold the request until the result is ready (otherwise poll the returned ID)"),
     ):

@@ -1,16 +1,20 @@
-"""High-accuracy mode: a large piano-specialised note detector.
+"""High-accuracy mode: large note detectors specialised for one instrument.
 
-Runs the high-resolution piano transcription model of Kong et al. (ByteDance,
-2021; about 20 million parameters, trained on concert piano recordings) through
-ONNX Runtime. It is about a thousand times larger than Basic Pitch, makes an
-analysis about ten times slower, and only knows the piano; but on piano
-recordings it finds far more of the notes, with exact attack and release times.
+Each is a high-resolution transcription network in the design of Kong et al.
+(ByteDance, 2021; about 20 million parameters), run through ONNX Runtime:
 
-The model file (models/piano.onnx) is a conversion of the published checkpoint
-made with tools/piano_export.py. The decoding of its outputs below follows
-piano_transcription_inference (Copyright 2020 Qiuqiang Kong, MIT licence),
-re-implemented with numpy so it runs in milliseconds. Licences and credits:
-models/NOTICE-piano-transcription.txt.
+  piano   ByteDance's model, trained on concert piano recordings
+  guitar  Xavier Riley's guitar adaptation of it (Queen Mary University of London)
+
+They are about a thousand times larger than Basic Pitch and make an analysis
+about ten times slower, and each knows only its instrument; but on that
+instrument they find far more of the notes, with exact attack and release times.
+
+The model files (models/piano.onnx, models/guitar.onnx) are conversions of the
+published checkpoints made with tools/transcriber_export.py. The decoding of
+their outputs below follows piano_transcription_inference (Copyright 2020
+Qiuqiang Kong, MIT licence), re-implemented with numpy so it runs in
+milliseconds. Licences and credits: models/NOTICE-*.txt.
 """
 
 from __future__ import annotations
@@ -36,20 +40,28 @@ OFFSET_THRESHOLD = 0.3
 FRAME_THRESHOLD = 0.1
 _MAX_FRAMES = 600  # a held note is cut after six seconds
 
-_MODEL_PATH = os.environ.get("CL_PIANO_MODEL") or os.path.join(os.path.dirname(__file__), "models", "piano.onnx")
-_session = None
+INSTRUMENTS = ("piano", "guitar")
+_MODELS = {
+    name: os.environ.get(f"CL_{name.upper()}_MODEL") or os.path.join(os.path.dirname(__file__), "models", f"{name}.onnx")
+    for name in INSTRUMENTS
+}
+_sessions: dict = {}
 _lock = threading.Lock()
 
 
-def available() -> bool:
-    return os.path.exists(_MODEL_PATH)
+def available(instrument: str = "piano") -> bool:
+    return instrument in _MODELS and os.path.exists(_MODELS[instrument])
 
 
-def _get_session():
-    global _session
-    if _session is None:
+def installed() -> list[str]:
+    """The instruments whose model is present."""
+    return [name for name in INSTRUMENTS if available(name)]
+
+
+def _get_session(instrument: str):
+    if instrument not in _sessions:
         with _lock:
-            if _session is None:
+            if instrument not in _sessions:
                 import onnxruntime as ort
 
                 opts = ort.SessionOptions()
@@ -57,8 +69,8 @@ def _get_session():
                 if threads > 0:
                     opts.intra_op_num_threads = threads
                 opts.log_severity_level = 3
-                _session = ort.InferenceSession(_MODEL_PATH, opts, providers=["CPUExecutionProvider"])
-    return _session
+                _sessions[instrument] = ort.InferenceSession(_MODELS[instrument], opts, providers=["CPUExecutionProvider"])
+    return _sessions[instrument]
 
 
 def resample(samples: np.ndarray, src: int = SAMPLE_RATE, dst: int = RATE) -> np.ndarray:
@@ -96,13 +108,13 @@ def _power(frames: np.ndarray, start: int, count: int) -> np.ndarray:
     return out
 
 
-def run_model(samples: np.ndarray) -> dict[str, np.ndarray]:
+def run_model(samples: np.ndarray, instrument: str = "piano") -> dict[str, np.ndarray]:
     """The model's four (frames, 88) outputs at 100 frames a second, for 22.05 kHz audio."""
     frames = _frames(resample(samples))
     total = len(frames)
     step = _SEGMENT // 2
     n_windows = max(1, -(-(total - step) // step)) if total > _SEGMENT else 1
-    session = _get_session()
+    session = _get_session(instrument)
     names = ["frame", "onset", "offset", "velocity"]
     out = {k: np.zeros(((n_windows - 1) * step + _SEGMENT, 88), np.float32) for k in names}
     # Spectra are made window by window, so memory stays flat however long the song.
@@ -185,16 +197,16 @@ def decode(out: dict[str, np.ndarray]) -> list[Note]:
     return notes
 
 
-# Share of the standard detector's confident notes the piano model must also
-# find before its notes are used. On real piano recordings the two agree on
+# Share of the standard detector's confident notes a specialist must also find
+# before its notes are used. Piano: on real piano recordings the two agree on
 # 81-97% of notes; on guitar, voice and band songs mostly far less, and there
 # the piano model misses or invents notes. 0.85 keeps those exactly as good as
 # standard mode while real piano gains almost all of the improvement.
-AGREEMENT = 0.85
+AGREEMENT = {"piano": 0.85, "guitar": 0.85}
 
 
 def agreement(standard: list[Note], found: list[Note]) -> float:
-    """How many of the standard detector's confident notes the piano model found too (same key, within 0.1 s)."""
+    """How many of the standard detector's confident notes a specialist found too (same key, within 0.1 s)."""
     sure = [n for n in standard if n.confidence >= 0.5]
     if not sure:
         return 0.0
@@ -213,6 +225,6 @@ def agreement(standard: list[Note], found: list[Note]) -> float:
     return hit / len(sure)
 
 
-def transcribe(samples: np.ndarray) -> list[Note]:
-    """Notes played in mono 22.05 kHz audio, by the piano model."""
-    return decode(run_model(samples))
+def transcribe(samples: np.ndarray, instrument: str = "piano") -> list[Note]:
+    """Notes played in mono 22.05 kHz audio, by the instrument's specialist model."""
+    return decode(run_model(samples, instrument))

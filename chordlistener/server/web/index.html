@@ -46,10 +46,13 @@
           <input id="file" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.flac,.ogg,.aiff,.aif,.webm,.mp4,.m4v,.mov,.mkv,.avi,.wmv,.flv,.mpg,.mpeg,.ts,.3gp" hidden>
         </div>
       </div>
-      <label class="hq-option" id="hq-option" hidden>
-        <input type="checkbox" id="hq">
-        <span><strong>High accuracy</strong> — a larger note detector made for piano. Gets far more of the notes right on piano recordings; takes longer.</span>
-      </label>
+      <fieldset class="hq-option" id="hq-option" hidden>
+        <legend>Notes</legend>
+        <label><input type="radio" name="hq" value="standard" checked> <span><strong>Standard</strong> — fast, for any music</span></label>
+        <label data-instrument="piano"><input type="radio" name="hq" value="piano"> <span><strong>High accuracy: piano</strong></span></label>
+        <label data-instrument="guitar"><input type="radio" name="hq" value="guitar"> <span><strong>High accuracy: guitar</strong></span></label>
+        <p class="hint">High accuracy adds a larger note detector made for one instrument. It gets more of the notes right on that instrument and takes longer.</p>
+      </fieldset>
       <p id="error" class="error" role="alert" hidden></p>
     </section>
 
@@ -95,7 +98,11 @@
           <dt>Notes</dt>
           <dd>
             <span id="fact-accuracy"></span>
-            <button type="button" id="accuracy-switch" class="wide"></button>
+            <select id="accuracy-select" aria-label="Re-analyse the notes with">
+              <option value="standard">Standard</option>
+              <option value="piano">High accuracy: piano</option>
+              <option value="guitar">High accuracy: guitar</option>
+            </select>
           </dd>
         </div>
         <div id="chip-tuning" hidden><dt>Tuning</dt><dd id="fact-tuning"></dd></div>

@@ -11,7 +11,7 @@ from . import ENGINE_VERSION
 from .audio import SAMPLE_RATE, load_audio
 from .beats import BeatGrid, estimate_tempo, fallback_grid, find_bars, onset_envelope, track_beats
 from .chords import ChordRecognizer, estimate_key, segment_chroma
-from . import notefilter, piano
+from . import highres, notefilter
 from .pitch import FPS, MIDI_OFFSET, Note, decode_notes, run_model
 from .theory import QUALITIES, Chord, Key, note_name, spell_pc
 from .tuning import estimate_tuning, retune
@@ -23,11 +23,17 @@ class AnalysisOptions:
     beats_per_bar: int | None = None  # force 3 or 4 instead of detecting
     tempo_scale: float = 1.0  # 0.5 or 2 to count the beat at half / double speed
     max_seconds: float | None = None
-    accuracy: str = "standard"  # standard | high (the large piano model for the notes; slower)
+    # standard, or a high-accuracy specialist for the notes: piano | guitar (slower).
+    # "high" is the older name for piano.
+    accuracy: str = "standard"
+
+    def __post_init__(self) -> None:
+        if self.accuracy == "high":
+            self.accuracy = "piano"
 
     def cache_key(self) -> str:
         key = f"{self.vocabulary}:{self.beats_per_bar or 'auto'}:{self.tempo_scale:g}"
-        return key + ":high" if self.accuracy == "high" else key
+        return key if self.accuracy == "standard" else f"{key}:{self.accuracy}"
 
 
 @dataclass
@@ -49,8 +55,8 @@ class Analysis:
     notes: list[Note]
     processing_ms: int = 0
     timings: dict = field(default_factory=dict)
-    accuracy: str = "standard"  # the mode asked for: standard | high
-    note_detector: str = "standard"  # who wrote the notes: standard | piano (high mode, on piano music)
+    accuracy: str = "standard"  # the mode used: standard | piano | guitar
+    note_detector: str = "standard"  # who wrote the notes: standard, or the specialist when the music suited it
     tuning_cents: float = 0.0  # how far the recording sits from concert pitch
     tuning_corrected: bool = False  # whether that was undone before analysing
 
@@ -153,7 +159,7 @@ class Analysis:
             processing_ms=rec.get("ms", 0),
             tuning_cents=rec.get("tuning", [0.0, False])[0],
             tuning_corrected=bool(rec.get("tuning", [0.0, False])[1]),
-            accuracy=rec.get("accuracy", ["standard", "standard"])[0],
+            accuracy={"high": "piano"}.get(rec.get("accuracy", ["standard"])[0], rec.get("accuracy", ["standard"])[0]),
             note_detector=rec.get("accuracy", ["standard", "standard"])[1],
         )
 
@@ -232,16 +238,16 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
     notes = notefilter.filtered_notes(act, samples) if notefilter.available() else decode_notes(act)
     timings["notes_ms"] = int((time.perf_counter() - t0) * 1000)
     accuracy = detector = "standard"
-    if options.accuracy == "high" and piano.available():
-        # High-accuracy mode: the large piano model listens too, and writes the
-        # notes when the music is piano (the two detectors then agree on most
-        # notes). Beats and chords stay with Basic Pitch, already reliable there.
+    if options.accuracy != "standard" and highres.available(options.accuracy):
+        # High-accuracy mode: the instrument's large specialist listens too, and
+        # writes the notes when the music is that instrument (the two detectors
+        # then agree on most notes). Beats and chords stay with Basic Pitch.
         t0 = time.perf_counter()
-        accuracy = "high"
-        found = piano.transcribe(samples)
-        if piano.agreement(notes, found) >= piano.AGREEMENT:
-            notes, detector = found, "piano"
-        timings["piano_model_ms"] = int((time.perf_counter() - t0) * 1000)
+        accuracy = options.accuracy
+        found = highres.transcribe(samples, accuracy)
+        if highres.agreement(notes, found) >= highres.AGREEMENT[accuracy]:
+            notes, detector = found, accuracy
+        timings[f"{accuracy}_model_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()
     env = onset_envelope(samples, act.onsets)

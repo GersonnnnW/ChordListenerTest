@@ -25,8 +25,8 @@ const state = {
   objectUrl: null,
   input: null, // what was analysed, so it can be re-run with other settings
   tempo: "auto",
-  accuracy: store("cl-accuracy") === "high" ? "high" : "standard", // which note detector to use
-  highAccuracy: false, // whether this server offers the high-accuracy mode
+  accuracy: "standard", // which note detector to use: standard, or a specialist (piano, guitar)
+  specialists: [], // the high-accuracy instruments this server offers
   capo: false, // showing the chords a guitarist would play (capo or dropped tuning)
   lyrics: null, // what the lyrics lookup found for this song
   links: {},
@@ -252,20 +252,32 @@ function send(path, form, onProgress) {
 
 const healthReady = api("/v1/health").then((health) => {
   state.maxUploadMb = health.max_upload_mb || state.maxUploadMb;
-  state.highAccuracy = Boolean(health.high_accuracy);
-  $("hq-option").hidden = !state.highAccuracy;
-  $("hq").checked = state.highAccuracy && state.accuracy === "high";
-  if (!state.highAccuracy) state.accuracy = "standard";
+  state.specialists = Array.isArray(health.high_accuracy) ? health.high_accuracy : [];
+  $("hq-option").hidden = state.specialists.length === 0;
+  for (const label of document.querySelectorAll("#hq-option [data-instrument]")) label.hidden = !state.specialists.includes(label.dataset.instrument);
+  for (const option of $("accuracy-select").options) option.hidden = option.value !== "standard" && !state.specialists.includes(option.value);
+  state.accuracy = chosenAccuracy();
 }).catch(() => {});
 
 // High accuracy: chosen up front on the start screen, and remembered for next time.
-$("hq").addEventListener("change", () => {
-  state.accuracy = $("hq").checked ? "high" : "standard";
-  store("cl-accuracy", state.accuracy);
+function chosenAccuracy() {
+  const saved = store("cl-accuracy");
+  const choice = saved === "high" ? "piano" : saved;
+  return state.specialists.includes(choice) ? choice : "standard";
+}
+for (const radio of document.querySelectorAll('input[name="hq"]')) {
+  radio.checked = radio.value === "standard";
+  radio.addEventListener("change", () => {
+    state.accuracy = radio.value;
+    store("cl-accuracy", state.accuracy);
+  });
+}
+healthReady.then(() => {
+  for (const radio of document.querySelectorAll('input[name="hq"]')) radio.checked = radio.value === state.accuracy;
 });
 
 function listeningStep() {
-  return state.accuracy === "high" ? "Listening closely to" : "Listening to";
+  return state.accuracy === "standard" ? "Listening to" : "Listening closely to";
 }
 
 /** Wait for a transcription to finish, then show it. */
@@ -330,12 +342,16 @@ function retime(direction) {
 $("half").addEventListener("click", () => retime(-1));
 $("double").addEventListener("click", () => retime(1));
 
-// Switch an existing transcription to the other note detector. With the file or
+// Switch an existing transcription to another note detector. With the file or
 // song still to hand it is simply sent again; from a shared link of a song found
 // by name, the server fetches it again itself.
 async function switchAccuracy() {
-  const next = state.accuracy === "high" ? "standard" : "high";
-  if (isDirty() && !confirm("Re-analysing starts a fresh transcription. Your unsaved corrections will be lost. Continue?")) return;
+  const next = $("accuracy-select").value;
+  if (next === state.accuracy) return;
+  if (isDirty() && !confirm("Re-analysing starts a fresh transcription. Your unsaved corrections will be lost. Continue?")) {
+    $("accuracy-select").value = state.accuracy;
+    return;
+  }
   $("audio").pause();
   state.accuracy = next;
   if (state.input) {
@@ -357,7 +373,7 @@ async function switchAccuracy() {
     fail(error.message);
   }
 }
-$("accuracy-switch").addEventListener("click", switchAccuracy);
+$("accuracy-select").addEventListener("change", switchAccuracy);
 
 function convertedAudio() {
   const token = (store("cl-edit-tokens") || {})[state.id];
@@ -411,22 +427,23 @@ async function present(body, audioUrl) {
   $("half").disabled = state.tempo === "half";
   $("double").disabled = state.tempo === "double";
   const result = body.result || {};
-  state.accuracy = result.accuracy === "high" ? "high" : "standard";
+  state.accuracy = ["piano", "guitar"].includes(result.accuracy) ? result.accuracy : result.accuracy === "high" ? "piano" : "standard";
   // Re-analysing needs the audio: the file still in this browser, or a song the server can fetch again.
-  const canSwitch = state.highAccuracy && (Boolean(state.input) || source.type === "catalog");
-  // High accuracy brings in the piano model only when the recording is piano;
+  const canSwitch = state.specialists.length > 0 && (Boolean(state.input) || source.type === "catalog");
+  // A specialist writes the notes only when the recording is its instrument;
   // otherwise the standard notes are kept, as they are better there.
-  const notPiano = state.accuracy === "high" && result.note_detector !== "piano";
-  $("chip-accuracy").hidden = !canSwitch && state.accuracy !== "high";
-  $("fact-accuracy").textContent = state.accuracy !== "high" ? "Standard" : notPiano ? "Standard (not piano)" : "High accuracy";
-  $("chip-accuracy").title = notPiano
-    ? "High accuracy uses a note detector made for piano. This recording does not sound like piano, so the standard notes were kept: they are more accurate here."
-    : "";
-  $("accuracy-switch").hidden = !canSwitch || notPiano;
-  $("accuracy-switch").textContent = state.accuracy === "high" ? "Use standard" : "Use high accuracy";
-  $("accuracy-switch").title = state.accuracy === "high"
-    ? "Analyse again with the standard note detector (faster; better for bands, guitar and voice)"
-    : "Analyse again with the larger piano note detector (more notes right on piano recordings; takes longer)";
+  const instrument = state.accuracy;
+  const fellBack = instrument !== "standard" && result.note_detector !== instrument;
+  $("chip-accuracy").hidden = !canSwitch && instrument === "standard";
+  $("accuracy-select").hidden = !canSwitch;
+  $("accuracy-select").value = instrument;
+  $("fact-accuracy").hidden = canSwitch && !fellBack;
+  $("fact-accuracy").textContent = canSwitch ? `standard notes kept: not ${instrument}`
+    : instrument === "standard" ? "Standard" : fellBack ? `Standard (not ${instrument})` : `High accuracy: ${instrument}`;
+  $("fact-accuracy").classList.toggle("muted-note", canSwitch);
+  $("chip-accuracy").title = fellBack
+    ? `High accuracy uses a note detector made for ${instrument}. This recording does not sound like ${instrument}, so the standard notes were kept: they are more accurate here.`
+    : "High accuracy uses a larger note detector made for one instrument: more of the notes right on that instrument, but it takes longer.";
   setPlaying(false);
   $("seek").value = 0;
 
@@ -1522,7 +1539,8 @@ $("again").addEventListener("click", () => {
   state.input = null;
   state.id = null;
   state.doc = null;
-  state.accuracy = state.highAccuracy && $("hq").checked ? "high" : "standard";
+  const checked = document.querySelector('input[name="hq"]:checked');
+  state.accuracy = checked && state.specialists.includes(checked.value) ? checked.value : "standard";
   state.view = null;
   history.replaceState(null, "", params.has("embed") ? "?embed=1" : location.pathname);
   $("search").value = "";
