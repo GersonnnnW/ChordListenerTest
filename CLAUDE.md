@@ -24,5 +24,9 @@ GuitarSet https://zenodo.org/records/3371780 (annotation.zip, audio_mono-mic.zip
 Real piano 89% / 73% · real guitar 83% / 77% · generated 89% / 78%. Melody line 77–95% right. Chord roots 99%.
 Ceiling: the Basic Pitch detector itself finds only 85–95% of played notes, so recall cannot exceed that without a stronger pitch model. Weakest: singing (~60%), dense full-band mixes.
 
+## Tried, did not help (don't repeat)
+- Wider local-context features (87 instead of 42) + 480 generated songs: better on generated songs, worse on real piano/voice. The note filter is at a plateau (real piano F≈0.81, guitar 0.84); more filter tuning gives ~1 point at most.
+- Resolving semitone clashes in chords: no measurable gain.
+
 ## Ideas not yet done
 Stronger (piano-specific) transcription model as an optional high-accuracy mode; vocal-specific handling; more full-band training data (full Slakh2100 is ~100 GB).
