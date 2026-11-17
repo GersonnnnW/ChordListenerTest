@@ -25,6 +25,8 @@ const state = {
   objectUrl: null,
   input: null, // what was analysed, so it can be re-run with other settings
   tempo: "auto",
+  accuracy: store("cl-accuracy") === "high" ? "high" : "standard", // which note detector to use
+  highAccuracy: false, // whether this server offers the high-accuracy mode
   capo: false, // showing the chords a guitarist would play (capo or dropped tuning)
   lyrics: null, // what the lyrics lookup found for this song
   links: {},
@@ -248,7 +250,34 @@ function send(path, form, onProgress) {
   });
 }
 
-api("/v1/health").then((health) => { state.maxUploadMb = health.max_upload_mb || state.maxUploadMb; }).catch(() => {});
+const healthReady = api("/v1/health").then((health) => {
+  state.maxUploadMb = health.max_upload_mb || state.maxUploadMb;
+  state.highAccuracy = Boolean(health.high_accuracy);
+  $("hq-option").hidden = !state.highAccuracy;
+  $("hq").checked = state.highAccuracy && state.accuracy === "high";
+  if (!state.highAccuracy) state.accuracy = "standard";
+}).catch(() => {});
+
+// High accuracy: chosen up front on the start screen, and remembered for next time.
+$("hq").addEventListener("change", () => {
+  state.accuracy = $("hq").checked ? "high" : "standard";
+  store("cl-accuracy", state.accuracy);
+});
+
+function listeningStep() {
+  return state.accuracy === "high" ? "Listening closely to" : "Listening to";
+}
+
+/** Wait for a transcription to finish, then show it. */
+async function finish(body, audioUrl) {
+  if (body.edit_token) rememberToken(body.id, body.edit_token);
+  while (body.status === "processing") {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    body = await api(`/v1/transcriptions/${body.id}`);
+  }
+  if (body.status !== "completed") throw new Error((body.error && body.error.message) || "The analysis failed.");
+  await present(body, audioUrl);
+}
 
 async function submit() {
   const input = state.input;
@@ -264,10 +293,11 @@ async function submit() {
     form.append("track_id", input.track.track_id);
   }
   form.append("tempo", state.tempo);
+  form.append("accuracy", state.accuracy);
   $("error").hidden = true;
   $("working-name").textContent = input.name;
   const big = Boolean(input.file) && input.file.size > 8 * 1024 * 1024;
-  $("working-step").textContent = big ? "Uploading" : "Listening to";
+  $("working-step").textContent = big ? "Uploading" : listeningStep();
   $("working-progress").hidden = !big;
   $("working-progress").value = 0;
   show("working");
@@ -275,17 +305,11 @@ async function submit() {
     let body = await send("/v1/transcriptions", form, (done) => {
       $("working-progress").value = Math.round(done * 100);
       if (done >= 1) {
-        $("working-step").textContent = "Listening to";
+        $("working-step").textContent = listeningStep();
         $("working-progress").hidden = true;
       }
     });
-    if (body.edit_token) rememberToken(body.id, body.edit_token);
-    while (body.status === "processing") {
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-      body = await api(`/v1/transcriptions/${body.id}`);
-    }
-    if (body.status !== "completed") throw new Error((body.error && body.error.message) || "The analysis failed.");
-    await present(body, input.audioUrl);
+    await finish(body, input.audioUrl);
   } catch (error) {
     fail(error.message);
   } finally {
@@ -306,6 +330,35 @@ function retime(direction) {
 $("half").addEventListener("click", () => retime(-1));
 $("double").addEventListener("click", () => retime(1));
 
+// Switch an existing transcription to the other note detector. With the file or
+// song still to hand it is simply sent again; from a shared link of a song found
+// by name, the server fetches it again itself.
+async function switchAccuracy() {
+  const next = state.accuracy === "high" ? "standard" : "high";
+  if (isDirty() && !confirm("Re-analysing starts a fresh transcription. Your unsaved corrections will be lost. Continue?")) return;
+  $("audio").pause();
+  state.accuracy = next;
+  if (state.input) {
+    submit();
+    return;
+  }
+  const audioUrl = $("audio").getAttribute("src") || null;
+  const form = new FormData();
+  form.append("accuracy", next);
+  $("error").hidden = true;
+  $("working-name").textContent = state.doc && state.doc.title ? state.doc.title : "your song";
+  $("working-step").textContent = listeningStep();
+  $("working-progress").hidden = true;
+  show("working");
+  try {
+    const body = await send(`/v1/transcriptions/${encodeURIComponent(state.id)}/reanalyze`, form, () => {});
+    await finish(body, audioUrl);
+  } catch (error) {
+    fail(error.message);
+  }
+}
+$("accuracy-switch").addEventListener("click", switchAccuracy);
+
 function convertedAudio() {
   const token = (store("cl-edit-tokens") || {})[state.id];
   return state.links.audio && token ? `${state.links.audio}?token=${encodeURIComponent(token)}` : "";
@@ -323,6 +376,7 @@ function releaseAudio() {
 // ---------------------------------------------------------------- result
 
 async function present(body, audioUrl) {
+  await healthReady;
   state.id = body.id;
   state.source = body.source;
   state.links = body.links || {};
@@ -356,6 +410,23 @@ async function present(body, audioUrl) {
   $("half").hidden = $("double").hidden = !state.input;
   $("half").disabled = state.tempo === "half";
   $("double").disabled = state.tempo === "double";
+  const result = body.result || {};
+  state.accuracy = result.accuracy === "high" ? "high" : "standard";
+  // Re-analysing needs the audio: the file still in this browser, or a song the server can fetch again.
+  const canSwitch = state.highAccuracy && (Boolean(state.input) || source.type === "catalog");
+  // High accuracy brings in the piano model only when the recording is piano;
+  // otherwise the standard notes are kept, as they are better there.
+  const notPiano = state.accuracy === "high" && result.note_detector !== "piano";
+  $("chip-accuracy").hidden = !canSwitch && state.accuracy !== "high";
+  $("fact-accuracy").textContent = state.accuracy !== "high" ? "Standard" : notPiano ? "Standard (not piano)" : "High accuracy";
+  $("chip-accuracy").title = notPiano
+    ? "High accuracy uses a note detector made for piano. This recording does not sound like piano, so the standard notes were kept: they are more accurate here."
+    : "";
+  $("accuracy-switch").hidden = !canSwitch || notPiano;
+  $("accuracy-switch").textContent = state.accuracy === "high" ? "Use standard" : "Use high accuracy";
+  $("accuracy-switch").title = state.accuracy === "high"
+    ? "Analyse again with the standard note detector (faster; better for bands, guitar and voice)"
+    : "Analyse again with the larger piano note detector (more notes right on piano recordings; takes longer)";
   setPlaying(false);
   $("seek").value = 0;
 
@@ -1451,6 +1522,7 @@ $("again").addEventListener("click", () => {
   state.input = null;
   state.id = null;
   state.doc = null;
+  state.accuracy = state.highAccuracy && $("hq").checked ? "high" : "standard";
   state.view = null;
   history.replaceState(null, "", params.has("embed") ? "?embed=1" : location.pathname);
   $("search").value = "";

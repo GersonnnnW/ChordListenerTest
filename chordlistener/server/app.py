@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .. import ENGINE_VERSION, __version__, export
 from ..audio import SNIFF_BYTES, AudioError, looks_like_video, to_mp3
 from ..lyrics import Lyrics, can_place, guess_title_artist, place
+from .. import piano
 from ..pipeline import Analysis, AnalysisOptions, analyze
 from ..document import ARRANGEMENTS, DocumentError, ShowOptions, document_from_analysis, document_view, normalize_document
 from ..document import chord_chart as document_chart
@@ -43,6 +44,7 @@ from .store import Store, hash_key
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 PUBLIC = "public"
 TEMPO_SCALES = {"auto": 1.0, "half": 0.5, "double": 2.0}
+ACCURACIES = ("standard", "high")
 MAX_SCORE_BYTES = 4 * 1024 * 1024
 
 
@@ -347,7 +349,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
                     future.add_done_callback(lambda _: running.pop(key, None))
                 seconds, was_cached = await asyncio.shield(future), False
             meta["audio_seconds"] = round(seconds, 2)
-            meta["options"] = {"vocabulary": options.vocabulary, "beats_per_bar": options.beats_per_bar, "tempo": next(k for k, v in TEMPO_SCALES.items() if v == options.tempo_scale)}
+            meta["options"] = {"vocabulary": options.vocabulary, "beats_per_bar": options.beats_per_bar, "tempo": next(k for k, v in TEMPO_SCALES.items() if v == options.tempo_scale), "accuracy": options.accuracy}
             if meta.get("video") and path and settings.keep_audio_minutes > 0:
                 # Browsers cannot play every video format, so hand back an MP3 of the soundtrack to play along with.
                 try:
@@ -388,14 +390,49 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
             body["edit_token"] = edit_token  # shown once; needed to save corrections without an API key
         return JSONResponse(body, status_code=status)
 
-    def parse_options(vocabulary: str, beats_per_bar: int | None, tempo: str) -> AnalysisOptions:
+    high_accuracy = settings.high_accuracy and piano.available()
+
+    def parse_options(vocabulary: str, beats_per_bar: int | None, tempo: str, accuracy: str = "standard") -> AnalysisOptions:
+        if accuracy not in ACCURACIES:
+            raise HTTPException(400, f"accuracy must be one of: {', '.join(ACCURACIES)}")
+        if accuracy == "high" and not high_accuracy:
+            raise HTTPException(400, "High-accuracy mode is not available on this server")
         if vocabulary not in VOCABULARIES:
             raise HTTPException(400, f"vocabulary must be one of: {', '.join(VOCABULARIES)}")
         if beats_per_bar not in (None, 3, 4):
             raise HTTPException(400, "beats_per_bar must be 3 or 4")
         if tempo not in TEMPO_SCALES:
             raise HTTPException(400, f"tempo must be one of: {', '.join(TEMPO_SCALES)}")
-        return AnalysisOptions(vocabulary=vocabulary, beats_per_bar=beats_per_bar, tempo_scale=TEMPO_SCALES[tempo], max_seconds=settings.max_seconds)
+        return AnalysisOptions(vocabulary=vocabulary, beats_per_bar=beats_per_bar, tempo_scale=TEMPO_SCALES[tempo], max_seconds=settings.max_seconds, accuracy=accuracy)
+
+    async def save_upload(file: UploadFile, path: str, fd: int) -> tuple[str, bytes]:
+        """Write an upload to `path`; return its SHA-256 and first bytes (to sniff the format)."""
+        digest = hashlib.sha256()
+        head = b""
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(1 << 20):
+                if len(head) < SNIFF_BYTES:
+                    head += chunk[: SNIFF_BYTES - len(head)]
+                digest.update(chunk)
+                out.write(chunk)
+        return digest.hexdigest(), head
+
+    async def fetch_track(track_id: str, path: str, options: AnalysisOptions) -> tuple[str, Track]:
+        """Download a catalogue track to `path` unless its result is already cached; return its hash."""
+        if provider is None:
+            raise HTTPException(400, "Song lookup is not enabled on this server")
+        try:
+            track = await provider.lookup(track_id)
+            if track is None:
+                raise HTTPException(404, "No such track in the catalogue")
+            content_hash = store.get_track_hash(provider.name, track.id)
+            known = content_hash and store.get_analysis(content_hash, options.cache_key(), ENGINE_VERSION) is not None
+            if not known:
+                content_hash = await provider.download(track, path, 30 * 1024 * 1024)
+                store.put_track_hash(provider.name, track.id, content_hash)
+        except CatalogError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return content_hash, track
 
     # ---- Endpoints --------------------------------------------------------
 
@@ -408,6 +445,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
             "catalog": provider.name if provider else None,
             "lyrics": lyrics_provider.name if lyrics_provider else None,
             "max_upload_mb": settings.max_upload_mb,
+            "high_accuracy": high_accuracy,
         }
 
     @app.post("/v1/transcriptions", tags=["Transcriptions"], summary="Analyse an audio file or a catalogue track")
@@ -418,26 +456,19 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         vocabulary: str = Form("standard", description="Chord detail: basic (major/minor), standard (adds 7ths, sus, dim, aug) or full"),
         beats_per_bar: int | None = Form(None, description="Force 3 or 4 beats per bar instead of detecting it"),
         tempo: str = Form("auto", description="auto, or half / double to count the beat at half or twice the detected speed"),
+        accuracy: str = Form("standard", description="standard, or high: a large piano-specialised note detector writes the notes. Best for piano recordings; takes longer"),
         title: str = Form("", max_length=200),
         artist: str = Form("", max_length=200),
         wait: bool = Query(True, description="Hold the request until the result is ready (otherwise poll the returned ID)"),
     ):
-        options = parse_options(vocabulary, beats_per_bar, tempo)
+        options = parse_options(vocabulary, beats_per_bar, tempo, accuracy)
         if (file is None) == (track_id is None):
             raise HTTPException(400, "Send exactly one of: file, track_id")
         charge(who)
         fd, path = tempfile.mkstemp(prefix="cl-", suffix=".audio")
         try:
             if file is not None:
-                digest = hashlib.sha256()
-                head = b""
-                with os.fdopen(fd, "wb") as out:
-                    while chunk := await file.read(1 << 20):
-                        if len(head) < SNIFF_BYTES:
-                            head += chunk[: SNIFF_BYTES - len(head)]
-                        digest.update(chunk)
-                        out.write(chunk)
-                content_hash = digest.hexdigest()
+                content_hash, head = await save_upload(file, path, fd)
                 filename = (file.filename or "")[:200]
                 # "Queen - Bohemian Rhapsody (Official Video).mp4" -> title and artist
                 clean_title, clean_artist = guess_title_artist(title, artist, filename)
@@ -447,23 +478,56 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
                 sweep_audio()
             else:
                 os.close(fd)
-                if provider is None:
-                    raise HTTPException(400, "Song lookup is not enabled on this server")
-                try:
-                    track = await provider.lookup(track_id)
-                    if track is None:
-                        raise HTTPException(404, "No such track in the catalogue")
-                    content_hash = store.get_track_hash(provider.name, track.id)
-                    known = content_hash and store.get_analysis(content_hash, options.cache_key(), ENGINE_VERSION) is not None
-                    if not known:
-                        content_hash = await provider.download(track, path, 30 * 1024 * 1024)
-                        store.put_track_hash(provider.name, track.id, content_hash)
-                except CatalogError as exc:
-                    raise HTTPException(502, str(exc)) from exc
+                content_hash, track = await fetch_track(track_id, path, options)
                 meta = {"type": "catalog", **_track_meta(track)}
         except BaseException:
             _unlink(path)
             raise
+        return await start(who, path, content_hash, options, meta, wait)
+
+    @app.post("/v1/transcriptions/{tid}/reanalyze", tags=["Transcriptions"], summary="Analyse the same song again, e.g. in high-accuracy mode")
+    async def reanalyze(
+        tid: str,
+        who: Caller = Depends(caller),
+        accuracy: str = Form("high", description="standard or high"),
+        file: UploadFile | None = File(None, description="The same file again. Needed only for an uploaded file whose result in this mode is not cached: uploads are never kept"),
+        wait: bool = Query(True, description="Hold the request until the result is ready (otherwise poll the returned ID)"),
+    ):
+        """Starts a new transcription of the same audio with the same settings, in the accuracy mode asked for.
+
+        A song found by name is fetched again from the catalogue. An uploaded file has to be sent
+        again unless this mode's result is already cached. The new transcription has its own ID
+        (and, without an API key, its own edit token); the original is left as it was.
+        """
+        row = owned(tid, who)
+        if row["status"] != "completed":
+            raise HTTPException(409, "The transcription is not finished yet")
+        meta = json.loads(row["meta"])
+        previous = meta.get("options") or {}
+        options = parse_options(previous.get("vocabulary", "standard"), previous.get("beats_per_bar"), previous.get("tempo", "auto"), accuracy)
+        meta = {k: v for k, v in meta.items() if k not in ("options", "audio_seconds")}
+        content_hash = row["content_hash"]
+        cached = store.get_analysis(content_hash, options.cache_key(), ENGINE_VERSION) is not None
+        path = None
+        if not cached and file is None and meta.get("type") != "catalog":
+            raise HTTPException(400, "Uploaded files are not kept, so send the same file again to analyse it in this mode")
+        charge(who)
+        if not cached:
+            fd, path = tempfile.mkstemp(prefix="cl-", suffix=".audio")
+            try:
+                if file is not None:
+                    sent_hash, _ = await save_upload(file, path, fd)
+                    if sent_hash != content_hash:
+                        raise HTTPException(400, "That is not the same file as the original transcription")
+                else:
+                    os.close(fd)
+                    content_hash, _ = await fetch_track(meta["track_id"], path, options)
+            except BaseException:
+                _unlink(path)
+                raise
+            if store.get_analysis(content_hash, options.cache_key(), ENGINE_VERSION) is not None:
+                _unlink(path)
+                path = None
         return await start(who, path, content_hash, options, meta, wait)
 
     @app.get("/v1/transcriptions/{tid}", tags=["Transcriptions"], summary="Fetch a transcription")

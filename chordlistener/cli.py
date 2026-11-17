@@ -15,7 +15,7 @@ def _analyze(args: argparse.Namespace) -> int:
 
     try:
         scale = {"auto": 1.0, "half": 0.5, "double": 2.0}[args.tempo]
-        result = analyze(args.audio, AnalysisOptions(vocabulary=args.vocabulary, beats_per_bar=args.beats_per_bar, tempo_scale=scale))
+        result = analyze(args.audio, AnalysisOptions(vocabulary=args.vocabulary, beats_per_bar=args.beats_per_bar, tempo_scale=scale, accuracy="high" if args.high_accuracy else "standard"))
     except (AudioError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--vocabulary", choices=["basic", "standard", "full"], default="standard")
     a.add_argument("--beats-per-bar", type=int, choices=[3, 4])
     a.add_argument("--tempo", choices=["auto", "half", "double"], default="auto", help="count the beat at half or double the detected speed")
+    a.add_argument("--high-accuracy", action="store_true", help="use the large piano note detector (best for piano recordings; slower)")
     a.add_argument("--transpose", type=int, default=0, help="semitones")
     a.add_argument("--title", default="")
     a.set_defaults(func=_analyze)

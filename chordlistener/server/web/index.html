@@ -46,6 +46,10 @@
           <input id="file" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.flac,.ogg,.aiff,.aif,.webm,.mp4,.m4v,.mov,.mkv,.avi,.wmv,.flv,.mpg,.mpeg,.ts,.3gp" hidden>
         </div>
       </div>
+      <label class="hq-option" id="hq-option" hidden>
+        <input type="checkbox" id="hq">
+        <span><strong>High accuracy</strong> — a larger note detector made for piano. Gets far more of the notes right on piano recordings; takes longer.</span>
+      </label>
       <p id="error" class="error" role="alert" hidden></p>
     </section>
 
@@ -85,6 +89,13 @@
             <output id="semitones">0</output>
             <button type="button" id="up" aria-label="Transpose up a semitone">+</button>
             <span id="capo-label" class="capo" hidden></span>
+          </dd>
+        </div>
+        <div id="chip-accuracy" class="stepper" hidden>
+          <dt>Notes</dt>
+          <dd>
+            <span id="fact-accuracy"></span>
+            <button type="button" id="accuracy-switch" class="wide"></button>
           </dd>
         </div>
         <div id="chip-tuning" hidden><dt>Tuning</dt><dd id="fact-tuning"></dd></div>

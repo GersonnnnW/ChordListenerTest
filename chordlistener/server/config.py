@@ -47,6 +47,8 @@ class Settings:
     keep_audio_minutes: int = field(default_factory=lambda: _int("CL_KEEP_AUDIO_MINUTES", 120))
     # Show the reserved advertising spaces on the website, and which ad-network
     # origins the page may load from (space separated) once they are filled.
+    # Offer the optional high-accuracy mode (the large piano model; slower per song).
+    high_accuracy: bool = field(default_factory=lambda: _bool("CL_HIGH_ACCURACY", True))
     ads: bool = field(default_factory=lambda: _bool("CL_ADS", False))
     ad_origins: str = field(default_factory=lambda: os.environ.get("CL_AD_ORIGINS", ""))
 

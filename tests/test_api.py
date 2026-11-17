@@ -399,3 +399,47 @@ def test_capo_and_guitar_tip(client, wav_path):
 def test_health_reports_limits(client):
     health = client.get("/v1/health").json()
     assert health["max_upload_mb"] == 1000 and health["engine_version"] == "3"
+
+
+needs_piano = pytest.mark.skipif(not __import__("chordlistener.piano").piano.available(), reason="piano model not installed")
+
+
+@needs_piano
+def test_high_accuracy_upload_and_switching_back_and_forth(client, wav_path):
+    assert client.get("/v1/health").json()["high_accuracy"] is True
+    assert upload(client, wav_path, data={"accuracy": "extreme"}).status_code == 400
+    high = upload(client, wav_path, data={"accuracy": "high", "tempo": "half"}).json()
+    assert high["status"] == "completed" and high["result"]["accuracy"] == "high"
+    assert high["source"]["options"]["accuracy"] == "high"
+
+    # Back to standard for the same upload: the file is not kept, so it must be sent again ...
+    tid = high["id"]
+    assert client.post(f"/v1/transcriptions/{tid}/reanalyze", data={"accuracy": "standard"}).status_code == 400
+    with open(__file__, "rb") as other:
+        wrong = client.post(f"/v1/transcriptions/{tid}/reanalyze", data={"accuracy": "standard"}, files={"file": ("x.wav", other, "audio/wav")})
+    assert wrong.status_code == 400
+    with open(wav_path, "rb") as fh:
+        standard = client.post(f"/v1/transcriptions/{tid}/reanalyze", data={"accuracy": "standard"}, files={"file": ("song.wav", fh, "audio/wav")}).json()
+    assert standard["result"]["accuracy"] == "standard" and standard["id"] != tid
+    assert standard["source"]["options"] == {**high["source"]["options"], "accuracy": "standard"}  # other settings kept
+    assert standard["edit_token"]
+    # ... unless that mode's result is already cached.
+    again = client.post(f"/v1/transcriptions/{standard['id']}/reanalyze", data={"accuracy": "high"}).json()
+    assert again["cached"] is True and again["result"]["accuracy"] == "high"
+
+
+@needs_piano
+def test_a_song_found_by_name_can_be_switched_to_high_accuracy(client):
+    body = client.post("/v1/transcriptions", data={"track_id": "42"}).json()
+    assert body["result"]["accuracy"] == "standard"
+    high = client.post(f"/v1/transcriptions/{body['id']}/reanalyze").json()  # high is the default
+    assert high["status"] == "completed" and high["result"]["accuracy"] == "high"
+    assert high["source"]["type"] == "catalog" and high["source"]["title"] == "Test Song"
+    assert client.catalog.downloads == 2  # fetched again: the clip is never kept
+    assert client.post("/v1/transcriptions/nope/reanalyze").status_code == 404
+
+
+def test_high_accuracy_can_be_switched_off(tmp_path, wav_path):
+    with make_client(tmp_path, wav_path, high_accuracy=False) as c:
+        assert c.get("/v1/health").json()["high_accuracy"] is False
+        assert upload(c, wav_path, data={"accuracy": "high"}).status_code == 400

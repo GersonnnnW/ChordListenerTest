@@ -11,7 +11,7 @@ from . import ENGINE_VERSION
 from .audio import SAMPLE_RATE, load_audio
 from .beats import BeatGrid, estimate_tempo, fallback_grid, find_bars, onset_envelope, track_beats
 from .chords import ChordRecognizer, estimate_key, segment_chroma
-from . import notefilter
+from . import notefilter, piano
 from .pitch import FPS, MIDI_OFFSET, Note, decode_notes, run_model
 from .theory import QUALITIES, Chord, Key, note_name, spell_pc
 from .tuning import estimate_tuning, retune
@@ -23,9 +23,11 @@ class AnalysisOptions:
     beats_per_bar: int | None = None  # force 3 or 4 instead of detecting
     tempo_scale: float = 1.0  # 0.5 or 2 to count the beat at half / double speed
     max_seconds: float | None = None
+    accuracy: str = "standard"  # standard | high (the large piano model for the notes; slower)
 
     def cache_key(self) -> str:
-        return f"{self.vocabulary}:{self.beats_per_bar or 'auto'}:{self.tempo_scale:g}"
+        key = f"{self.vocabulary}:{self.beats_per_bar or 'auto'}:{self.tempo_scale:g}"
+        return key + ":high" if self.accuracy == "high" else key
 
 
 @dataclass
@@ -47,6 +49,8 @@ class Analysis:
     notes: list[Note]
     processing_ms: int = 0
     timings: dict = field(default_factory=dict)
+    accuracy: str = "standard"  # the mode asked for: standard | high
+    note_detector: str = "standard"  # who wrote the notes: standard | piano (high mode, on piano music)
     tuning_cents: float = 0.0  # how far the recording sits from concert pitch
     tuning_corrected: bool = False  # whether that was undone before analysing
 
@@ -96,6 +100,8 @@ class Analysis:
             },
             "chords": chords,
             "processing_ms": self.processing_ms,
+            "accuracy": self.accuracy,
+            "note_detector": self.note_detector,
         }
         if include_notes:
             out["notes"] = [
@@ -128,6 +134,7 @@ class Analysis:
             "notes": [[round(n.start, 4), round(n.end, 4), n.pitch, round(n.velocity, 3), round(n.confidence, 2)] for n in self.notes],
             "ms": self.processing_ms,
             "tuning": [round(self.tuning_cents, 1), self.tuning_corrected],
+            "accuracy": [self.accuracy, self.note_detector],
         }
 
     @classmethod
@@ -146,6 +153,8 @@ class Analysis:
             processing_ms=rec.get("ms", 0),
             tuning_cents=rec.get("tuning", [0.0, False])[0],
             tuning_corrected=bool(rec.get("tuning", [0.0, False])[1]),
+            accuracy=rec.get("accuracy", ["standard", "standard"])[0],
+            note_detector=rec.get("accuracy", ["standard", "standard"])[1],
         )
 
 
@@ -222,6 +231,17 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
     # A trained filter judges each candidate note in context; without it, fall back to fixed thresholds.
     notes = notefilter.filtered_notes(act, samples) if notefilter.available() else decode_notes(act)
     timings["notes_ms"] = int((time.perf_counter() - t0) * 1000)
+    accuracy = detector = "standard"
+    if options.accuracy == "high" and piano.available():
+        # High-accuracy mode: the large piano model listens too, and writes the
+        # notes when the music is piano (the two detectors then agree on most
+        # notes). Beats and chords stay with Basic Pitch, already reliable there.
+        t0 = time.perf_counter()
+        accuracy = "high"
+        found = piano.transcribe(samples)
+        if piano.agreement(notes, found) >= piano.AGREEMENT:
+            notes, detector = found, "piano"
+        timings["piano_model_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()
     env = onset_envelope(samples, act.onsets)
@@ -283,7 +303,7 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
 
     grid = BeatGrid(times[origin : stop + 1], per_bar, 0)
     total = int((time.perf_counter() - started) * 1000)
-    return Analysis(duration, key, key_confidence, grid, chords, notes, total, timings)
+    return Analysis(duration, key, key_confidence, grid, chords, notes, total, timings, accuracy, detector)
 
 
 def analyze(path: str, options: AnalysisOptions | None = None) -> Analysis:

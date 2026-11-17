@@ -30,6 +30,7 @@ Send **exactly one** of `file` or `track_id`.
 | `vocabulary` | string | `standard` | `basic` = major/minor only. `standard` adds 7, maj7, m7, sus2, sus4, dim, aug. `full` adds 6, m6, m7b5, dim7 and reports extended chords more readily |
 | `beats_per_bar` | integer | detect | Force `3` or `4` |
 | `tempo` | string | `auto` | `half` or `double` counts the beat at half / twice the detected speed |
+| `accuracy` | string | `standard` | `high` adds a large piano-specialised note detector. On piano recordings it writes far more of the notes correctly; on other music (guitar, voice, bands) the standard notes are kept, so it is never worse. Takes about ten times longer (a 3-minute song: ~20 s instead of ~2 s). See [Analyse again](#analyse-again-eg-in-high-accuracy-mode) to switch an existing transcription |
 | `title`, `artist` | string | | Carried into the sheet music and file names, and used to look up lyrics. If omitted they are guessed from the file name ("Artist - Title.mp3") |
 
 Query parameter `wait` (default `true`): hold the request open until the result is ready. Most songs finish in a few seconds. With `wait=false`, or if the wait runs out, the response is `202` with `"status": "processing"`; poll `GET /v1/transcriptions/{id}`.
@@ -78,7 +79,7 @@ Requests made **without** an API key also get an `"edit_token"` in this response
   "created_at": "2026-11-16T14:02:11Z",
   "cached": false,
   "source": {"type": "upload", "filename": "song.mp3", "title": "My Song", "artist": "", "audio_seconds": 213.4,
-             "options": {"vocabulary": "standard", "beats_per_bar": null, "tempo": "auto"}},
+             "options": {"vocabulary": "standard", "beats_per_bar": null, "tempo": "auto", "accuracy": "standard"}},
   "result": {
     "engine_version": "3",
     "duration": 213.4,
@@ -96,7 +97,9 @@ Requests made **without** an API key also get an `"edit_token"` in this response
     "notes": [
       {"start": 0.51, "end": 1.02, "pitch": 60, "name": "C4", "velocity": 0.71}
     ],
-    "processing_ms": 2740
+    "processing_ms": 2740,
+    "accuracy": "standard",
+    "note_detector": "standard"
   },
   "links": {
     "self": "/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w",
@@ -118,6 +121,25 @@ Field notes:
 - `tuning.cents` is how far the recording sits from concert pitch (negative = flat); `reference_hz` is the same thing as the frequency of its A. When the offset is 15 cents or more the audio is brought to pitch before analysis (`corrected`), so chords and notes are reported at the nearest standard pitch.
 - For a video upload, `source.video` is `true` and `links.audio` points to an MP3 of its soundtrack until `audio_expires_at`.
 - `cached` is `true` when this exact audio and settings had been analysed before; the request then returns in milliseconds.
+- `accuracy` is the mode asked for. `note_detector` says which detector wrote the notes: `piano` when high-accuracy mode recognised piano music and used the piano model, otherwise `standard`.
+
+## Analyse again, e.g. in high-accuracy mode
+
+`POST /v1/transcriptions/{id}/reanalyze` — `multipart/form-data`
+
+Analyses the same song again with the same settings (`vocabulary`, `beats_per_bar`, `tempo`) in the accuracy mode asked for. The result is a **new** transcription with its own ID (and, without an API key, its own `edit_token`); the original, and any corrections saved to it, are left as they were. The response is the same as for creating a transcription, and it counts as one request against rate limits and quotas.
+
+| Field | Type | Default | |
+|---|---|---|---|
+| `accuracy` | string | `high` | `standard` or `high` |
+| `file` | file | | The same file again. Needed only for an **uploaded** file whose result in that mode is not cached yet, because uploads are never kept. A different file is rejected |
+
+A song found by name (`track_id`) needs nothing extra: the server fetches it again from the catalogue.
+
+```bash
+curl -H "Authorization: Bearer $KEY" -F "accuracy=high" \
+     https://api.example.com/v1/transcriptions/tr_Zk3q9oXc1vJ8mB2nR5tY7w/reanalyze
+```
 
 ## Fetch a transcription
 
@@ -273,7 +295,9 @@ Pass an instance to `create_app(settings, catalog=MyCatalog())`. Results are cac
 
 ## Health
 
-`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "3", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000}`
+`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "3", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000, "high_accuracy": true}`
+
+`high_accuracy` says whether this server offers `accuracy=high`.
 
 ## Errors
 
@@ -285,7 +309,7 @@ Every error has the same shape:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `bad_request` | Missing or conflicting fields, unknown option value |
+| 400 | `bad_request` | Missing or conflicting fields, unknown option value, high-accuracy mode not offered, or re-analysing an upload without sending the file again |
 | 401 | `unauthorized` | Missing, invalid or revoked key |
 | 403 | `forbidden` | Saving or discarding corrections without the key or edit token that created the transcription |
 | 404 | `not_found` | Unknown ID, or a transcription that belongs to another key |

@@ -13,6 +13,12 @@ The note-decoding routine in `chordlistener/pitch.py` is a re-implementation of 
 
 > Rachel M. Bittner, Juan José Bosch, David Rubinstein, Gabriel Meseguer-Brocal, Sebastian Ewert. "A Lightweight Instrument-Agnostic Model for Polyphonic Note Transcription and Multipitch Estimation." ICASSP 2022.
 
+### High-resolution piano transcription model — CC BY 4.0 (weights), MIT (decoding)
+
+`chordlistener/models/piano.onnx`, used by the optional high-accuracy mode, is converted from the checkpoint `CRNN_note_F1=0.9677_pedal_F1=0.9186.pth` published at <https://zenodo.org/records/4034264> under CC BY 4.0: only the note model is kept, converted to ONNX with 16-bit weights (`tools/piano_export.py`). The output decoding in `chordlistener/piano.py` re-implements <https://github.com/qiuqiangkong/piano_transcription_inference> (MIT, Copyright (c) 2020 Qiuqiang Kong). Details and licence text: `chordlistener/models/NOTICE-piano-transcription.txt`.
+
+> Qiuqiang Kong, Bochen Li, Xuchen Song, Yuan Wan, Yuxuan Wang. "High-resolution Piano Transcription with Pedals by Regressing Onset and Offset Times." IEEE/ACM Transactions on Audio, Speech, and Language Processing, 2021.
+
 ### OpenSheetMusicDisplay — BSD 3-Clause
 
 `chordlistener/server/web/vendor/opensheetmusicdisplay.min.js` (version 2.3.1), from <https://github.com/opensheetmusicdisplay/opensheetmusicdisplay>. It embeds VexFlow (MIT).

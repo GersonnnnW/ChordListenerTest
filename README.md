@@ -29,11 +29,14 @@ No large language model is involved, so **analysing a song costs zero AI tokens*
 7. **Arrangement** — every trusted note is written, each given to a hand that can reach it (no hand stretches beyond a ninth or so; where a chord is too wide, only notes that double another an octave away are left out, so the harmony is kept). Sixteenths are only used when the music really has them. For the lead sheet a second trained model picks out the **tune**: it scores each note for being the melody, and a line-finder chooses one smooth, likely line through the song.
 8. **Notation** — the result is split into bars with ties and rests, spelled according to the key, and written as MusicXML.
 
+**Optional high-accuracy mode** (a tick box on the website, `accuracy=high` in the API, `--high-accuracy` on the command line). A second, much larger note detector made for piano (ByteDance's high-resolution piano transcription model, about 20 million parameters) listens to the recording as well. Where the music is piano — recognised because the two detectors then agree on at least 85% of the notes — its notes are written instead; on guitar, voice and band recordings, where it misses or invents notes, the standard notes are kept, so the mode is never worse. Beats, chords and key always come from the standard pipeline. A finished transcription can be switched to high accuracy afterwards with one click (or `POST /v1/transcriptions/{id}/reanalyze`).
+
 Measured on a 4-core cloud VM, no GPU:
 
 | | |
 |---|---|
 | Analysis speed | about **60× real time** — a 4-minute MP3 in about 4 seconds, decoding included |
+| High-accuracy mode | about **8× real time** — a 3-minute song in about 23 seconds |
 | 30-second preview clip, end to end | about **0.5 s** |
 | Same audio requested again | about **40 ms** (served from the result cache) |
 | Sheet music / MIDI / transposed versions of a finished analysis | a few ms each, generated on demand from the stored result |
@@ -86,6 +89,7 @@ docker run -p 8000:8000 -v chordlistener-data:/data chordlistener
 - **Download** — a PDF with a choice of what goes in it: the notes, chords, lyrics, key and tempo, each on or off, as a piano score or a lead sheet. MusicXML, MIDI, a text chord chart and JSON are also offered.
 
 - **Guitar tip** — when the sounding chords are awkward on guitar (Bbm, Ab, Db…), the page suggests the capo position that turns them into easy shapes (capo 1: Am, G, C) and shows those chords with one click. This is usually why chords "look wrong" next to a chord sheet: sheets are written for the capo, the recording sounds a few semitones higher.
+- **High accuracy** — tick the box under the search and upload panels before choosing a song, or press **Use high accuracy** next to the result afterwards. Best for piano recordings (95% of written notes right instead of 89%, and 93% of played notes written instead of 73%); it takes about ten times longer. On music that is not piano the page says "Standard (not piano)" and keeps the standard notes, which are better there.
 - **Tuning** — if the recording is not at concert pitch, the page says so (for example "A = 432 Hz").
 - **Video uploads** — MP4, MOV, MKV, WebM, AVI, WMV, FLV and MPEG files are accepted directly, up to 1 GB by default, with an upload progress bar. The soundtrack is converted to MP3 on the server, used for playback when the browser cannot play the video itself, and offered as a download.
 
@@ -183,6 +187,7 @@ All settings are environment variables.
 | `CL_MODEL_THREADS` | all cores | CPU threads the pitch model may use per analysis |
 | `CL_CATALOG` | `itunes` | Song lookup provider; `none` disables search by name |
 | `CL_CORS_ORIGINS` | `*` | Browser origins allowed to call the API |
+| `CL_HIGH_ACCURACY` | `true` | Offer the optional high-accuracy mode (about ten times the CPU per song that uses it) |
 | `CL_ADS` | `false` | Show the reserved advertising spaces on the website |
 | `CL_AD_ORIGINS` | none | Ad-network domains the page may load scripts, frames and images from (space separated) |
 | `CL_MEDIA_ORIGINS` | Apple's CDN | Origins the website may load artwork and preview audio from; change it when you plug in your own catalogue |
@@ -203,6 +208,7 @@ On generated test songs with known answers (`python -m tools.evaluate`, 10 songs
 | Piano score, both hands | Right | Written |
 |---|---|---|
 | Real piano recordings (never used in training) | 89% (was 78%) | 73% (was 52%) |
+| Real piano, **high-accuracy mode** | **95%** | **93%** |
 | Real guitar recordings, players held out of training | 83% (was 72%) | 77% (was 56%) |
 | Generated songs | 89% (was 62%) | 78% (was 55%) |
 | Generated songs, instruments held out of training | 77% (was 69%) | 75% (was 61%) |
@@ -239,7 +245,7 @@ The melody model is trained with `python -m tools.notefilter.melody`. Real piano
 
 This is not legal advice — treat it as a checklist to take to a lawyer.
 
-- **The code's dependencies allow commercial use.** The pitch model is Apache-2.0, the notation renderer BSD-3, the Python libraries MIT/BSD. Attribution notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and must ship with the product. ffmpeg is called as a separate program; check the licence of the build you distribute.
+- **The code's dependencies allow commercial use.** The pitch model is Apache-2.0, the high-accuracy piano model CC BY 4.0 (attribution required, which THIRD_PARTY_NOTICES.md provides; like most piano transcription models it was trained on the MAESTRO recordings, whose own licence is non-commercial — worth a line in the lawyer's review), the notation renderer BSD-3, the Python libraries MIT/BSD. Attribution notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and must ship with the product. ffmpeg is called as a separate program; check the licence of the build you distribute.
 - **Lyrics are copyrighted.** The built-in lookup uses LRCLIB, a volunteer-run database with no licence from publishers. That is fine for trying the feature; a commercial product that displays or prints lyrics needs a licensed provider (Musixmatch, LyricFind and similar), which plugs in through the one-method `LyricsProvider` interface in `chordlistener/server/lyricsdb.py`, or should run with `CL_LYRICS=none`.
 - **Search by name uses Apple's iTunes Search API and its 30-second previews.** That API is intended for promoting Apple's store, and its terms limit how previews may be used. It is fine for a demo; a commercial product should use a catalogue you have rights to, which is what the `CatalogProvider` interface is for. This is also why search by name analyses a 30-second clip: there is no legitimate free source of full-length commercial recordings. Full songs come from audio the user or the business customer supplies.
 - **Chords and sheet music of copyrighted songs are themselves subject to copyright.** A tool that transcribes a user's own upload for them is in a different position from a site that publishes transcriptions of famous songs; the second normally needs agreements with music publishers.

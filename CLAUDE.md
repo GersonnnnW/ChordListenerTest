@@ -5,10 +5,10 @@ Audio/video or a song name in → chords, notes, key, tempo, editable sheet musi
 ## Owner
 - Not a programmer; explain in plain words, short. Runs it on a Mac (Python 3.13; 3.14+ lacks onnxruntime wheels): `python3.13 -m pip install ".[server]"` then `python3.13 -m chordlistener.cli serve` → http://127.0.0.1:8000.
 - Priorities: sheet music a musician can play correctly; fast and cheap to run; ready for ads later (CL_ADS); keep token use low (keep replies brief, avoid dumping big outputs).
-- Work on branch `claude/tender-sagan-dlasng`; commit + push when done; no PRs unless asked.
+- Work on the branch the session names (earlier: `claude/tender-sagan-dlasng`, `claude/epic-pasteur-t4fqcn`); commit + push when done; no PRs unless asked.
 
 ## Layout (chordlistener/)
-audio.py decode (ffmpeg, video too) · tuning.py concert-pitch check · pitch.py Basic Pitch ONNX + decode_events · notefilter.py trained note filter (models/notefilter.json) · melody.py trained melody model (models/melody.json) · beats.py · chords.py · arrange.py two-hand layout, grid, lead line · document.py editable score JSON · score.py/musicxml.py notation · guitar.py capo tips · lyrics.py + server/lyricsdb.py (LRCLIB) · server/ FastAPI app, SQLite store, website in server/web.
+audio.py decode (ffmpeg, video too) · tuning.py concert-pitch check · pitch.py Basic Pitch ONNX + decode_events · piano.py high-accuracy mode (ByteDance piano model, models/piano.onnx 41 MB, made by tools/piano_export.py) · notefilter.py trained note filter (models/notefilter.json) · melody.py trained melody model (models/melody.json) · beats.py · chords.py · arrange.py two-hand layout, grid, lead line · document.py editable score JSON · score.py/musicxml.py notation · guitar.py capo tips · lyrics.py + server/lyricsdb.py (LRCLIB) · server/ FastAPI app, SQLite store, website in server/web.
 
 ## Commands
 - Tests: `python -m pytest -q` (all must pass; CI on Python 3.10 + 3.13 — avoid 3.12-only syntax).
@@ -21,12 +21,15 @@ audio.py decode (ffmpeg, video too) · tuning.py concert-pitch check · pitch.py
 GuitarSet https://zenodo.org/records/3371780 (annotation.zip, audio_mono-mic.zip) · vocadito https://zenodo.org/records/5578807 · BabySlakh https://zenodo.org/records/4603870 — all CC BY 4.0, may train. SMD piano (audiolabs-erlangen.de/resources/MIR/SMD/midi) is CC BY-NC-SA: **test only, never train**. Layout expected by tools/notefilter/real.py: DATASETS/{guitarset/{ann,audio},vocadito,slakh/babyslakh_16k,smd/files}.
 
 ## Accuracy now (written piano score, right / played-notes-written)
-Real piano 89% / 73% · real guitar 83% / 77% · generated 89% / 78%. Melody line 77–95% right. Chord roots 99%.
-Ceiling: the Basic Pitch detector itself finds only 85–95% of played notes, so recall cannot exceed that without a stronger pitch model. Weakest: singing (~60%), dense full-band mixes.
+Standard: real piano 89% / 73% · real guitar 83% / 77% · generated 89% / 78%. Melody line 77–95% right. Chord roots 99%.
+High-accuracy mode (`accuracy=high`): real piano 95% / 93% (F 0.82 → 0.94). The piano model is used only when it agrees with the standard notes on ≥85% (piano.AGREEMENT); otherwise standard notes are kept (guitar/band unchanged). ~10× slower (3-min song ≈ 23 s on 4 cores). Evaluate: `python -m tools.evaluate_sheet --real DATASETS --accuracy high`.
+Weakest: singing (~60%), dense full-band mixes.
 
 ## Tried, did not help (don't repeat)
 - Wider local-context features (87 instead of 42) + 480 generated songs: better on generated songs, worse on real piano/voice. The note filter is at a plateau (real piano F≈0.81, guitar 0.84); more filter tuning gives ~1 point at most.
 - Resolving semitone clashes in chords: no measurable gain.
 
+- Piano model on its own for everything: much worse on guitar (F 0.80 → 0.52) and band songs (melody line collapses). Union of both detectors' notes: worse than either alone on guitar.
+
 ## Ideas not yet done
-Stronger (piano-specific) transcription model as an optional high-accuracy mode; vocal-specific handling; more full-band training data (full Slakh2100 is ~100 GB).
+Per-section (not per-song) choice of detector, for songs that are piano only in parts; a guitar- or vocal-specific model the same way; more full-band training data (full Slakh2100 is ~100 GB).
