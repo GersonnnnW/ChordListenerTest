@@ -196,14 +196,14 @@ def arrange(analysis: Analysis, total: int, max_notes: int = 5, faithful: bool |
         )
 
     tune_keys = {(n[0], n[2]) for n in found}  # whatever happens to them below, these are not accompaniment
-    tune_at = {}  # sixteenth -> melody pitch (as written) sounding there
-    for start, length, pitch, _ in lead:
+    tune_at = {}  # sixteenth -> melody pitch sounding there
+    for start, length, pitch, _ in tune:
         for pos in range(start, start + length):
             tune_at[pos] = pitch
     by_start: dict[int, list[Quantised]] = {}
     for note in notes:
         by_start.setdefault(note[0], []).append(note)
-    right: list[Quantised] = list(lead)
+    right: list[Quantised] = list(tune)  # at the pitch it was played: the octave shift is only for the lead sheet
     left: list[Quantised] = []
     for note in notes:
         start, length, pitch, strength = note
@@ -234,11 +234,12 @@ def arrange(analysis: Analysis, total: int, max_notes: int = 5, faithful: bool |
 
 
 def _two_hands(notes: list[Quantised]) -> tuple[list[Quantised], list[Quantised]]:
-    """Give every note to a hand that can reach it.
+    """Give every note to a hand that can reach it; never drop one.
 
-    Notes above middle C go to the right hand and the rest to the left; when
-    the notes struck together in one hand span more than a ninth, the stray
-    ones are passed to the other hand if it can take them.
+    For each group of notes struck together, the lowest k go to the left hand
+    and the rest to the right, choosing k so that neither hand has to stretch
+    beyond a ninth and, among those splits, so that as few notes as possible
+    cross middle C into the "wrong" hand.
     """
     by_start: dict[int, list[Quantised]] = {}
     for note in notes:
@@ -247,20 +248,38 @@ def _two_hands(notes: list[Quantised]) -> tuple[list[Quantised], list[Quantised]
     left: list[Quantised] = []
     for start in sorted(by_start):
         group = sorted(by_start[start], key=lambda n: n[2])
-        high = [n for n in group if n[2] >= SPLIT]
-        low = [n for n in group if n[2] < SPLIT]
-        # Too wide for the right hand: its lowest notes go to the left, if that keeps the left playable.
-        while len(high) > 1 and high[-1][2] - high[0][2] > SPAN:
-            stray = high.pop(0)
-            if not low or stray[2] - low[0][2] <= SPAN:
-                low.append(stray)
-        while len(low) > 1 and low[-1][2] - low[0][2] > SPAN:
-            stray = low.pop()
-            if not high or high[-1][2] - stray[2] <= SPAN:
-                high.insert(0, stray)
-        right += high
+        pitches = [n[2] for n in group]
+        best_k, best_cost = 0, None
+        for k in range(len(group) + 1):
+            low, high = pitches[:k], pitches[k:]
+            stretch = max(0, (low[-1] - low[0]) - SPAN if low else 0) + max(0, (high[-1] - high[0]) - SPAN if high else 0)
+            crossing = sum(p >= SPLIT for p in low) + sum(p < SPLIT for p in high)
+            cost = (stretch, crossing)
+            if best_cost is None or cost < best_cost:
+                best_k, best_cost = k, cost
+        low, high = _thin(group[:best_k], group), _thin(group[best_k:], group)
         left += low
+        right += high
     return right, left
+
+
+def _thin(hand: list[Quantised], everything: list[Quantised]) -> list[Quantised]:
+    """If a hand must stretch beyond its reach, drop notes that only double another an octave away.
+
+    A doubling adds colour but no new harmony, so leaving it out keeps the
+    chord intact while making it playable. Notes with no double are kept.
+    """
+    hand = sorted(hand, key=lambda n: n[2])
+    while len(hand) > 1 and hand[-1][2] - hand[0][2] > SPAN:
+        others = lambda note: {n[2] for n in everything if n is not note}  # noqa: E731
+        for edge in (hand[0], hand[-1]):  # only the outer notes can shrink the stretch
+            if any(abs(edge[2] - p) in (12, 24) for p in others(edge)):
+                hand.remove(edge)
+                everything = [n for n in everything if n is not edge]
+                break
+        else:
+            break
+    return hand
 
 
 def _tidy_tune(tune: list[Quantised], chord_at: list[frozenset[int]], scale: frozenset[int], total: int) -> list[Quantised]:

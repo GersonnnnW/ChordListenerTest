@@ -398,4 +398,4 @@ def test_capo_and_guitar_tip(client, wav_path):
 
 def test_health_reports_limits(client):
     health = client.get("/v1/health").json()
-    assert health["max_upload_mb"] == 1000 and health["engine_version"] == "2"
+    assert health["max_upload_mb"] == 1000 and health["engine_version"] == "3"

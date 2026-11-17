@@ -75,8 +75,46 @@ def test_right_hand_keeps_the_tune_on_top(analysis):
     tops = {start: max(pitches) for start, _, pitches in right}
     on_top = [tops.get(start) == pitches[0] for start, _, pitches in lead if start in tops]
     assert sum(on_top) / len(on_top) > 0.9
-    assert all(max(pitches) < 60 for _, _, pitches in left)
-    assert all(start % 2 == 0 for start, _, _ in left)  # the bass moves in eighths at most
+    # Each hand plays what it can reach: chords struck together fit within a ninth or so.
+    for staff in (right, left):
+        assert sum(max(p) - min(p) <= A.SPAN + 2 for _, _, p in staff) / len(staff) > 0.95  # a tenth at most
+    # The left hand stays below the right; notes only cross middle C when a hand could not reach otherwise.
+    assert np.median([max(p) for _, _, p in left]) < 60 < np.median([min(p) for _, _, p in right])
+    assert sum(max(p) <= 64 for _, _, p in left) / len(left) > 0.9
+
+
+def test_cautious_arrangement_without_the_note_filter(analysis):
+    total = (len(analysis.grid.times) - 1) * 4
+    cautious = A.arrange(analysis, total, faithful=False)
+    assert all(max(pitches) < 60 for _, _, pitches in cautious.left)
+    assert all(start % 2 == 0 for start, _, _ in cautious.left)  # the bass moves in eighths at most
+    faithful = A.arrange(analysis, total, faithful=True)
+    played = {(start, pitch) for start, _, pitch, _ in A.quantise(analysis, total)[0]}
+    on_page = {(start, p) for staff in (faithful.right, faithful.left) for start, _, ps in staff for p in ps}
+    assert on_page <= played  # nothing invented
+    assert len(on_page) >= 0.9 * len(played)  # and almost everything written; only octave doublings may go
+
+
+def test_two_hands_respect_the_reach():
+    # C3 to E5 is too wide for one hand but fits two.
+    notes = [(0, 4, pitch, 0.7) for pitch in (48, 52, 55, 60, 64, 67, 72, 76)]
+    right, left = A._two_hands(notes)
+    for hand in (right, left):
+        pitches = [n[2] for n in hand]
+        assert max(pitches) - min(pitches) <= A.SPAN
+    assert sorted(n[2] for n in right + left) == sorted(n[2] for n in notes)  # nothing lost
+
+
+def test_only_octave_doublings_are_dropped_to_make_a_chord_playable():
+    # Low C with a right-hand C-E-G-C an octave up: the top C doubles the bottom one of the right hand.
+    right, left = A._two_hands([(0, 4, p, 0.7) for p in (36, 60, 64, 67, 72, 79)])
+    pitches = sorted(n[2] for n in right + left)
+    assert 36 in pitches and {p % 12 for p in pitches} == {0, 4, 7}  # still a C major chord on a low C
+    for hand in (right, left):
+        assert max(n[2] for n in hand) - min(n[2] for n in hand) <= A.SPAN
+    # Without a doubling to spare, every note stays even if the stretch is wide.
+    right, left = A._two_hands([(0, 4, p, 0.7) for p in (36, 61, 66, 79)])
+    assert sorted(n[2] for n in right + left) == [36, 61, 66, 79]
 
 
 def test_low_tunes_are_written_an_octave_up():
