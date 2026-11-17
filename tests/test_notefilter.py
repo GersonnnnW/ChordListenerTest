@@ -90,3 +90,42 @@ def test_filter_writes_more_true_notes_and_fewer_false_ones(heard, song):
     for n in new_notes:
         assert by_pitch.get(n.pitch, 0.0) <= n.start + 1e-9
         by_pitch[n.pitch] = n.end
+
+
+# ---- Melody model ------------------------------------------------------------
+
+from chordlistener import melody  # noqa: E402
+
+
+def test_melody_features_describe_each_note(analysis):
+    x = melody.features(analysis)
+    assert x.shape == (len(analysis.notes), len(melody.FEATURES)) and np.isfinite(x).all()
+    column = {name: x[:, i] for i, name in enumerate(melody.FEATURES)}
+    assert ((column["in_chord"] == 0) | (column["in_chord"] == 1)).all()
+    assert (column["higher_sounding"] >= 0).all() and (column["off_beat"] <= 0.5).all()
+
+
+def test_best_line_is_one_note_at_a_time_and_prefers_likely_smooth_notes():
+    starts = np.array([0, 0, 4, 4, 8, 8, 12])
+    ends = starts + 4
+    pitch = np.array([72, 60, 74, 62, 76, 91, 77], dtype=float)
+    chance = np.array([0.9, 0.4, 0.8, 0.3, 0.7, 0.6, 0.9])
+    line = melody.best_line(starts, ends, pitch, chance, threshold=0.2, leap_cost=0.3)
+    assert [int(pitch[i]) for i in line] == [72, 74, 76, 77]  # the leap to 91 is not worth it
+    assert len({int(starts[i]) for i in line}) == len(line)
+    assert melody.best_line(starts, ends, pitch, np.full(7, 0.05), 0.2, 0.3) == []  # nothing tune-like
+
+
+@pytest.mark.skipif(not melody.available(), reason="no trained melody model in this checkout")
+def test_learned_melody_finds_the_tune(analysis, song):
+    from chordlistener import arrange as A
+
+    total = (len(analysis.grid.times) - 1) * 4
+    sources = []
+    notes, _ = A.quantise(analysis, total, sources=sources)
+    line = A.learned_melody(analysis, notes, sources)
+    assert line and all(a[0] + a[1] <= b[0] for a, b in zip(line, line[1:]))  # never two notes at once
+    lead = [(s, p) for t in song.tracks if t.name == "Lead" for s, _, p, _ in t.notes]
+    beats = np.array(analysis.grid.times)
+    page = [(float(np.interp(s / 4, np.arange(len(beats)), beats)), p) for s, _, p, _ in line]
+    assert data.match(page, lead, 0.1).sum() / len(page) > 0.6

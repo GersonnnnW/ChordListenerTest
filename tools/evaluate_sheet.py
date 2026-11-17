@@ -43,12 +43,14 @@ def compare(page: list[tuple[float, int]], truth: list[tuple[float, int]]) -> tu
 def summarise(label: str, counts: list[tuple[int, int, int]]) -> str:
     hit, page, truth = (sum(c[i] for c in counts) for i in range(3))
     precision, recall = hit / max(page, 1), hit / max(truth, 1)
+    if "right only" in label:
+        return f"{label:<34} written notes that are right {precision:6.1%}"
     f = 2 * precision * recall / max(precision + recall, 1e-9)
     return f"{label:<34} written notes that are right {precision:6.1%} | played notes that are written {recall:6.1%} | F {f:.3f}"
 
 
 def synthetic(count: int, unseen: bool, first: int) -> dict[str, list]:
-    rows: dict[str, list] = {"piano (both hands)": [], "right hand": [], "left hand": [], "melody line": []}
+    rows: dict[str, list] = {"piano (both hands)": [], "right hand (right only)": [], "left hand (right only)": [], "melody line": []}
     with tempfile.TemporaryDirectory() as tmp:
         wav = os.path.join(tmp, "song.wav")
         for seed in range(first, first + count):
@@ -58,8 +60,10 @@ def synthetic(count: int, unseen: bool, first: int) -> dict[str, list]:
             truth = [(s, p) for s, _, p in song.pitched_notes]
             right, left = doc["arrangements"]["piano"]
             rows["piano (both hands)"].append(compare(written(doc, [right, left]), truth))
-            rows["right hand"].append(compare(written(doc, [right]), [n for n in truth if n[1] >= 60]))
-            rows["left hand"].append(compare(written(doc, [left]), [n for n in truth if n[1] < 60]))
+            # Hands may cross middle C, so a hand's notes are checked against everything played;
+            # only "right" is meaningful per hand, "written" is for both hands together.
+            rows["right hand (right only)"].append(compare(written(doc, [right]), truth))
+            rows["left hand (right only)"].append(compare(written(doc, [left]), truth))
             lead = [(s, p) for t in song.tracks if t.name == "Lead" for s, _, p, _ in t.notes]
             if lead:
                 rows["melody line"].append(compare(written(doc, doc["arrangements"]["lead"]), lead))

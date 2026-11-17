@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import melody
 from .pipeline import Analysis
 from .score import DIVISIONS, Event, voice
 from .theory import QUALITIES
@@ -50,24 +51,29 @@ def choose_grid(positions: np.ndarray) -> int:
     return 1 if off.sum() > 0.22 * max(on.sum() + off.sum(), 1) else 2
 
 
-def quantise(analysis: Analysis, total: int, grid: int | None = None) -> tuple[list[Quantised], int]:
-    """Snap notes to the beat grid. Returns (notes, grid step in sixteenths)."""
+def quantise(analysis: Analysis, total: int, grid: int | None = None, sources: list[int] | None = None) -> tuple[list[Quantised], int]:
+    """Snap notes to the beat grid. Returns (notes, grid step in sixteenths).
+
+    If `sources` is given, it is filled with the index in analysis.notes of each returned note.
+    """
     if not analysis.notes:
         return [], 2
     beat_grid = analysis.grid
     starts = beat_grid.position(np.array([n.start for n in analysis.notes])) * DIVISIONS
     ends = beat_grid.position(np.array([n.end for n in analysis.notes])) * DIVISIONS
     step = grid or choose_grid(starts)
-    out: list[Quantised] = []
-    for note, s, e in zip(analysis.notes, starts, ends):
+    out: list[tuple[Quantised, int]] = []
+    for index, (note, s, e) in enumerate(zip(analysis.notes, starts, ends)):
         start = int(round(s / step)) * step
         if not 21 <= note.pitch <= 108 or start >= total:
             continue
         start = max(0, start)
         length = max(step, int(round((e - s) / step)) * step)
-        out.append((start, min(length, total - start), note.pitch, note.velocity))
+        out.append(((start, min(length, total - start), note.pitch, note.velocity), index))
     out.sort()
-    return out, step
+    if sources is not None:
+        sources[:] = [index for _, index in out]
+    return [q for q, _ in out], step
 
 
 def harmony_map(analysis: Analysis, total: int) -> tuple[list[frozenset[int]], frozenset[int]]:
@@ -174,13 +180,14 @@ def arrange(analysis: Analysis, total: int, max_notes: int = 5, faithful: bool |
     Without the filter (fixed thresholds), fall back to the cautious
     arrangement that only keeps what agrees with the chords.
     """
-    notes, step = quantise(analysis, total)
+    sources: list[int] = []
+    notes, step = quantise(analysis, total, sources=sources)
     if not notes:
         return Arrangement([], [], [], step)
     if faithful is None:
         faithful = any(n.confidence < 1.0 for n in analysis.notes)
     chord_at, scale = harmony_map(analysis, total)
-    found = find_melody(notes)
+    found = learned_melody(analysis, notes, sources) if melody.available() else find_melody(notes)
     tune = _tidy_tune(found, chord_at, scale, total)
     # A low vocal line is written an octave up on a lead sheet, where it reads comfortably in treble clef.
     shift = _treble_shift(tune)
@@ -231,6 +238,24 @@ def arrange(analysis: Analysis, total: int, max_notes: int = 5, faithful: bool |
         melody=voice(lead, total, 1, "top"),
         grid=step,
     )
+
+
+def learned_melody(analysis: Analysis, notes: list[Quantised], sources: list[int]) -> list[Quantised]:
+    """The tune as the trained melody model sees it, as one line on the grid."""
+    model = melody._load()
+    chance = melody.probabilities(melody.features(analysis), model)[sources]
+    starts = np.array([n[0] for n in notes])
+    ends = np.array([n[0] + n[1] for n in notes])
+    pitch = np.array([n[2] for n in notes], dtype=float)
+    line = sorted(melody.best_line(starts, ends, pitch, chance, model["threshold"], model["leap_cost"]), key=lambda i: notes[i][0])
+    out: list[Quantised] = []
+    for k, i in enumerate(line):
+        start, length, p, a = notes[i]
+        if k + 1 < len(line):
+            length = min(length, notes[line[k + 1]][0] - start)  # the next note cuts this one off
+        if length > 0:
+            out.append((start, length, p, a))
+    return out
 
 
 def _two_hands(notes: list[Quantised]) -> tuple[list[Quantised], list[Quantised]]:
