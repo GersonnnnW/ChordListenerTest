@@ -11,6 +11,7 @@ from . import ENGINE_VERSION
 from .audio import SAMPLE_RATE, load_audio
 from .beats import BeatGrid, estimate_tempo, fallback_grid, find_bars, onset_envelope, track_beats
 from .chords import ChordRecognizer, estimate_key, segment_chroma
+from . import notefilter
 from .pitch import FPS, MIDI_OFFSET, Note, decode_notes, run_model
 from .theory import QUALITIES, Chord, Key, note_name, spell_pc
 from .tuning import estimate_tuning, retune
@@ -104,6 +105,7 @@ class Analysis:
                     "pitch": n.pitch + transpose,
                     "name": note_name(n.pitch + transpose, key),
                     "velocity": round(n.velocity, 3),
+                    "confidence": round(n.confidence, 2),
                 }
                 for n in self.notes
                 if 0 <= n.pitch + transpose <= 127
@@ -123,7 +125,7 @@ class Analysis:
                 [round(c.start, 4), round(c.end, 4), c.chord.root if c.chord else -1, c.chord.quality if c.chord else "", -1 if not c.chord or c.chord.bass is None else c.chord.bass, c.confidence, c.beat]
                 for c in self.chords
             ],
-            "notes": [[round(n.start, 4), round(n.end, 4), n.pitch, round(n.velocity, 3)] for n in self.notes],
+            "notes": [[round(n.start, 4), round(n.end, 4), n.pitch, round(n.velocity, 3), round(n.confidence, 2)] for n in self.notes],
             "ms": self.processing_ms,
             "tuning": [round(self.tuning_cents, 1), self.tuning_corrected],
         }
@@ -217,7 +219,8 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
     timings["model_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()
-    notes = decode_notes(act)
+    # A trained filter judges each candidate note in context; without it, fall back to fixed thresholds.
+    notes = notefilter.filtered_notes(act) if notefilter.available() else decode_notes(act)
     timings["notes_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()

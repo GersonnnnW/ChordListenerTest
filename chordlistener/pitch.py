@@ -99,9 +99,10 @@ class Note:
     end: float
     pitch: int  # MIDI number
     velocity: float  # 0..1
+    confidence: float = 1.0  # how sure the note filter is that this was really played
 
     def to_dict(self) -> dict:
-        return {"start": round(self.start, 3), "end": round(self.end, 3), "pitch": self.pitch, "velocity": round(self.velocity, 3)}
+        return {"start": round(self.start, 3), "end": round(self.end, 3), "pitch": self.pitch, "velocity": round(self.velocity, 3), "confidence": round(self.confidence, 2)}
 
 
 def _inferred_onsets(onsets: np.ndarray, frames: np.ndarray) -> np.ndarray:
@@ -125,6 +126,20 @@ def decode_notes(
     energy_tolerance: int = 11,
     min_amplitude: float = 0.35,
 ) -> list[Note]:
+    """Notes straight from the network's activations, by fixed thresholds."""
+    events = decode_events(act, onset_threshold, frame_threshold, min_note_seconds, energy_tolerance)
+    # Faint detections are mostly drum hits and overtones mistaken for notes.
+    return [Note(t0 / FPS, t1 / FPS, f + MIDI_OFFSET, min(1.0, amp)) for t0, t1, f, amp, _ in events if amp >= min_amplitude]
+
+
+def decode_events(
+    act: Activations,
+    onset_threshold: float = 0.5,
+    frame_threshold: float = 0.3,
+    min_note_seconds: float = 0.11,
+    energy_tolerance: int = 11,
+) -> list[tuple[int, int, int, float, bool]]:
+    """Candidate notes as (first frame, end frame, key 0..87, mean activation, has a clear attack)."""
     frames = act.frames
     n_frames = frames.shape[0]
     if n_frames < 4:
@@ -138,7 +153,7 @@ def decode_notes(
     order = np.argsort(-peak_t, kind="stable")  # latest first, so earlier notes stop at later ones
 
     remaining = frames.copy()
-    events: list[tuple[int, int, int, float]] = []
+    events: list[tuple[int, int, int, float, bool]] = []
     last = n_frames - 1
     for t0, f in zip(peak_t[order].tolist(), peak_f[order].tolist()):
         if t0 >= last:
@@ -152,7 +167,7 @@ def decode_notes(
         if i - t0 <= min_len:
             continue
         remaining[t0:i, max(f - 1, 0) : f + 2] = 0
-        events.append((t0, i, f, float(frames[t0:i, f].mean())))
+        events.append((t0, i, f, float(frames[t0:i, f].mean()), True))
 
     # Notes with no clear attack (voice, strings, pads): grow outwards from the
     # strongest leftover activation until it fades. Visiting leftovers from
@@ -178,8 +193,7 @@ def decode_notes(
         begin = i + 1 + k
         remaining[max(i, 0) : hi, max(f - 1, 0) : min(f + 2, N_PITCHES)] = 0
         if end - begin > min_len:
-            events.append((begin, end, f, float(frames[begin:end, f].mean())))
+            events.append((begin, end, f, float(frames[begin:end, f].mean()), False))
 
     events.sort()
-    # Faint detections are mostly drum hits and overtones mistaken for notes.
-    return [Note(t0 / FPS, t1 / FPS, f + MIDI_OFFSET, min(1.0, amp)) for t0, t1, f, amp in events if amp >= min_amplitude]
+    return events

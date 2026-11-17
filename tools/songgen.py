@@ -75,13 +75,21 @@ def make_song(
     drums: bool = True,
     melody: bool = True,
     lead_in: float = 0.5,
+    programs: tuple[int, int, int] | None = None,
+    pattern: str | None = None,
+    lead_centre: int = 74,
+    levels: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> Song:
     """Build a song. `progression` is a list of (chord symbol, length in beats)."""
     rng = random.Random(seed)
     key_minor = key.endswith("m")
     key_tonic = parse_chord(key[:-1] if key_minor else key)[0]
     scale = [(key_tonic + d) % 12 for d in (_MINOR_SCALE if key_minor else _MAJOR_SCALE)]
-    comp_prog, bass_prog, lead_prog, pattern = STYLES[style]
+    comp_prog, bass_prog, lead_prog, style_pattern = STYLES[style]
+    if programs is not None:
+        comp_prog, bass_prog, lead_prog = programs  # General MIDI instruments for (accompaniment, bass, lead)
+    pattern = pattern or style_pattern
+    lead_low, lead_high = lead_centre - 11, lead_centre + 12
     beat = 60.0 / bpm
 
     comp: list = []
@@ -91,7 +99,7 @@ def make_song(
     chords: list = []
     t = lead_in
     n_beat = 0
-    lead_pitch = 72
+    lead_pitch = lead_centre
     for _ in range(repeats):
         for symbol, length in progression:
             root, quality = parse_chord(symbol)
@@ -145,7 +153,7 @@ def make_song(
                         if rng.random() < 0.15:
                             continue
                         strong = offset == 0.0
-                        pool = [p for p in range(lead_pitch - 5, lead_pitch + 6) if 64 <= p <= 86]
+                        pool = [p for p in range(lead_pitch - 5, lead_pitch + 6) if lead_low <= p <= lead_high]
                         chord_tones = [p for p in pool if p % 12 in tones]
                         scale_tones = [p for p in pool if p % 12 in scale]
                         choices = chord_tones if (strong or rng.random() < 0.5) and chord_tones else (scale_tones or pool)
@@ -166,9 +174,12 @@ def make_song(
             t = end
             n_beat += length
 
-    tracks = [MidiTrack(comp, comp_prog, 0, "Comp"), MidiTrack(bass, bass_prog, 1, "Bass")]
+    def level(notes: list, gain: float) -> list:
+        return [(s, e, p, max(1, min(127, int(v * gain)))) for s, e, p, v in notes]
+
+    tracks = [MidiTrack(level(comp, levels[0]), comp_prog, 0, "Comp"), MidiTrack(level(bass, levels[1]), bass_prog, 1, "Bass")]
     if melody:
-        tracks.append(MidiTrack(lead, lead_prog, 2, "Lead"))
+        tracks.append(MidiTrack(level(lead, levels[2]), lead_prog, 2, "Lead"))
     if drums:
         tracks.append(MidiTrack(kit, 0, 9, "Drums"))
     beats = [lead_in + i * beat for i in range(n_beat)]

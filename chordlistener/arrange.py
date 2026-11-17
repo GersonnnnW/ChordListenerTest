@@ -163,27 +163,47 @@ def _is_overtone(note: Quantised, others: list[Quantised]) -> bool:
     return False
 
 
-def arrange(analysis: Analysis, total: int, max_notes: int = 4) -> Arrangement:
+SPAN = 14  # semitones one hand can cover comfortably (a ninth)
+
+
+def arrange(analysis: Analysis, total: int, max_notes: int = 5, faithful: bool | None = None) -> Arrangement:
+    """Lay the detected notes out for two hands, plus the tune on its own.
+
+    With the trained note filter the detected notes can be trusted, so the
+    score is *faithful*: every note is written, in the hand that can reach it.
+    Without the filter (fixed thresholds), fall back to the cautious
+    arrangement that only keeps what agrees with the chords.
+    """
     notes, step = quantise(analysis, total)
     if not notes:
         return Arrangement([], [], [], step)
+    if faithful is None:
+        faithful = any(n.confidence < 1.0 for n in analysis.notes)
     chord_at, scale = harmony_map(analysis, total)
     found = find_melody(notes)
-    tune_keys = {(n[0], n[2]) for n in found}  # whatever happens to them below, these are not accompaniment
     tune = _tidy_tune(found, chord_at, scale, total)
-    # A low vocal line is written an octave up, where it reads comfortably in treble clef.
+    # A low vocal line is written an octave up on a lead sheet, where it reads comfortably in treble clef.
     shift = _treble_shift(tune)
-    written = [(s, l, p + shift, a) for s, l, p, a in tune]
+    lead = [(s, l, p + shift, a) for s, l, p, a in tune]
+
+    if faithful:
+        right_notes, left_notes = _two_hands(notes)
+        return Arrangement(
+            right=voice(right_notes, total, max_notes, "top"),
+            left=voice(left_notes, total, max_notes, "bottom"),
+            melody=voice(lead, total, 1, "top"),
+            grid=step,
+        )
+
+    tune_keys = {(n[0], n[2]) for n in found}  # whatever happens to them below, these are not accompaniment
     tune_at = {}  # sixteenth -> melody pitch (as written) sounding there
-    for start, length, pitch, _ in written:
+    for start, length, pitch, _ in lead:
         for pos in range(start, start + length):
             tune_at[pos] = pitch
-
     by_start: dict[int, list[Quantised]] = {}
     for note in notes:
         by_start.setdefault(note[0], []).append(note)
-
-    right: list[Quantised] = list(written)
+    right: list[Quantised] = list(lead)
     left: list[Quantised] = []
     for note in notes:
         start, length, pitch, strength = note
@@ -202,20 +222,45 @@ def arrange(analysis: Analysis, total: int, max_notes: int = 4) -> Arrangement:
             right.append(note)
         else:
             # The bass may walk between chords, so strong scale notes stay too.
-            # Bass parts rarely move faster than eighths; finer detail down
-            # here is almost always detection jitter.
             if in_chord or (pc in scale and strength >= 0.5):
                 snapped = min((start + 1) // 2 * 2, total - 2)
                 left.append((snapped, max(2, (length + 1) // 2 * 2), pitch, strength))
-
-    melody_shift = _treble_shift(tune)
-    lead = [(s, l, p + melody_shift, a) for s, l, p, a in tune]
     return Arrangement(
-        right=voice(right, total, max_notes, "top"),
+        right=voice(right, total, min(max_notes, 4), "top"),
         left=voice(left, total, min(max_notes, 3), "bottom"),
-        melody=voice(written, total, 1, "top"),
+        melody=voice(lead, total, 1, "top"),
         grid=step,
     )
+
+
+def _two_hands(notes: list[Quantised]) -> tuple[list[Quantised], list[Quantised]]:
+    """Give every note to a hand that can reach it.
+
+    Notes above middle C go to the right hand and the rest to the left; when
+    the notes struck together in one hand span more than a ninth, the stray
+    ones are passed to the other hand if it can take them.
+    """
+    by_start: dict[int, list[Quantised]] = {}
+    for note in notes:
+        by_start.setdefault(note[0], []).append(note)
+    right: list[Quantised] = []
+    left: list[Quantised] = []
+    for start in sorted(by_start):
+        group = sorted(by_start[start], key=lambda n: n[2])
+        high = [n for n in group if n[2] >= SPLIT]
+        low = [n for n in group if n[2] < SPLIT]
+        # Too wide for the right hand: its lowest notes go to the left, if that keeps the left playable.
+        while len(high) > 1 and high[-1][2] - high[0][2] > SPAN:
+            stray = high.pop(0)
+            if not low or stray[2] - low[0][2] <= SPAN:
+                low.append(stray)
+        while len(low) > 1 and low[-1][2] - low[0][2] > SPAN:
+            stray = low.pop()
+            if not high or high[-1][2] - stray[2] <= SPAN:
+                high.insert(0, stray)
+        right += high
+        left += low
+    return right, left
 
 
 def _tidy_tune(tune: list[Quantised], chord_at: list[frozenset[int]], scale: frozenset[int], total: int) -> list[Quantised]:
