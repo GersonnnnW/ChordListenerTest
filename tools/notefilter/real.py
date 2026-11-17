@@ -2,6 +2,8 @@
 
   GuitarSet  acoustic guitar, 360 excerpts            CC BY 4.0      (training + testing)
   vocadito   solo singing, 40 excerpts                CC BY 4.0      (training + testing)
+  BabySlakh  full-band songs rendered with studio     CC BY 4.0      (training + testing)
+             sample libraries, 20 songs
   SMD        piano on a Disklavier, aligned MIDI      CC BY-NC-SA    (testing only: non-commercial)
 
 python -m tools.notefilter.real OUT.npz DATA_DIR
@@ -21,7 +23,7 @@ from chordlistener.audio import load_audio
 from tools.notefilter import data
 
 
-def read_midi_notes(path: str) -> list[tuple[float, int]]:
+def read_midi_notes(path: str, skip_drum_channel: bool = True) -> list[tuple[float, int]]:
     """(start in seconds, pitch) of every note in a Standard MIDI File, honouring tempo changes."""
     raw = open(path, "rb").read()
     assert raw[:4] == b"MThd"
@@ -75,7 +77,7 @@ def read_midi_notes(path: str) -> list[tuple[float, int]]:
                 else:
                     a, b = raw[pos], raw[pos + 1]
                     pos += 2
-                    if kind == 0x90 and b > 0 and (status & 0x0F) != 9:
+                    if kind == 0x90 and b > 0 and not (skip_drum_channel and (status & 0x0F) == 9):
                         ons.append((tick, a))
         pos = end
     tempos = sorted(tempos) or [(0, 500000)]
@@ -116,6 +118,21 @@ def vocadito(root: str):
         yield "vocadito", name, name, wav, notes
 
 
+def slakh(root: str):
+    import yaml
+
+    for folder in sorted(glob.glob(os.path.join(root, "slakh", "babyslakh_16k", "Track*"))):
+        meta = yaml.safe_load(open(os.path.join(folder, "metadata.yaml")))
+        notes = []
+        for stem, info in meta["stems"].items():
+            midi = os.path.join(folder, "MIDI", stem + ".mid")
+            if info.get("is_drum") or not info.get("audio_rendered", True) or not os.path.exists(midi):
+                continue
+            notes += read_midi_notes(midi, skip_drum_channel=False)
+        name = os.path.basename(folder)
+        yield "slakh", name, name, os.path.join(folder, "mix.wav"), sorted(notes)
+
+
 def smd(root: str):
     for mid in sorted(glob.glob(os.path.join(root, "smd", "files", "*.mid"))):
         mp3 = mid[:-4] + ".mp3"
@@ -125,18 +142,22 @@ def smd(root: str):
 
 
 def main() -> None:
+    """python -m tools.notefilter.real OUT.npz DATA_DIR PART PARTS  (PART of PARTS, to run several at once)"""
     out, root = sys.argv[1], sys.argv[2]
+    part, parts = (int(sys.argv[3]), int(sys.argv[4])) if len(sys.argv) > 4 else (0, 1)
+    todo = []
+    for loader, limit in ((guitarset, None), (vocadito, None), (slakh, 240.0), (smd, 150.0)):
+        todo += [(item, limit) for item in loader(root)]
     rows = []
-    for loader, limit in ((guitarset, None), (vocadito, None), (smd, 150.0)):
-        for dataset, group, name, audio, notes in loader(root):
-            samples = load_audio(audio, limit)
-            if limit:
-                notes = [n for n in notes if n[0] < limit - 0.5]
-            item = data.examples(samples, notes)
-            item.update(dataset=dataset, group=f"{dataset}:{group}", name=name)
-            rows.append(item)
-            if len(rows) % 40 == 0:
-                print(len(rows), "recordings", flush=True)
+    for (dataset, group, name, audio, notes), limit in todo[part::parts]:
+        samples = load_audio(audio, limit)
+        if limit:
+            notes = [n for n in notes if n[0] < limit - 0.5]
+        item = data.examples(samples, notes)
+        item.update(dataset=dataset, group=f"{dataset}:{group}", name=name)
+        rows.append(item)
+        if len(rows) % 25 == 0:
+            print(len(rows), "recordings", flush=True)
     index = np.concatenate([np.full(len(r["y"]), i) for i, r in enumerate(rows)])
     np.savez_compressed(
         out,

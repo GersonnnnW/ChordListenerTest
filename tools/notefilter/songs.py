@@ -64,6 +64,12 @@ def random_spec(seed: int, unseen: bool = False) -> dict:
         choices = UNSEEN[kind] if unseen else [p for p in pool if p not in UNSEEN[kind]]
         return rng.choice(choices)
 
+    programs = (pick("comp", COMP), pick("bass", BASS), pick("lead", LEAD))
+    drums = rng.random() < 0.8
+    if rng.random() < 0.2:
+        # One instrument playing everything: a pianist or guitarist alone.
+        solo = rng.choice([1, 4, 5, 24, 25, 26] if not unseen else [0, 2, 27])
+        programs, drums = (solo, solo, solo), False
     return dict(
         progression=progression,
         bpm=bpm,
@@ -71,9 +77,9 @@ def random_spec(seed: int, unseen: bool = False) -> dict:
         key=_NAMES[tonic] + ("m" if minor else ""),
         repeats=repeats,
         seed=seed,
-        drums=rng.random() < 0.8,
+        drums=drums,
         melody=rng.random() < 0.88,
-        programs=(pick("comp", COMP), pick("bass", BASS), pick("lead", LEAD)),
+        programs=programs,
         pattern=rng.choice(PATTERNS),
         lead_centre=rng.choice([62, 67, 72, 74, 76, 79]),
         levels=(rng.uniform(0.6, 1.0), rng.uniform(0.6, 1.0), rng.uniform(0.7, 1.05)),

@@ -220,7 +220,7 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
 
     t0 = time.perf_counter()
     # A trained filter judges each candidate note in context; without it, fall back to fixed thresholds.
-    notes = notefilter.filtered_notes(act) if notefilter.available() else decode_notes(act)
+    notes = notefilter.filtered_notes(act, samples) if notefilter.available() else decode_notes(act)
     timings["notes_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()

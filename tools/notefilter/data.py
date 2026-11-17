@@ -44,25 +44,25 @@ def distinct(reference: list[tuple[float, int]], window: float = 0.03) -> list[t
 
 
 def prepare(samples: np.ndarray):
-    """Normalise and bring to concert pitch exactly as the real pipeline does. Returns (activations, time stretch)."""
+    """Normalise and bring to concert pitch exactly as the real pipeline does. Returns (activations, time stretch, audio)."""
     peak = float(np.abs(samples).max()) or 1.0
     samples = samples * (0.9 / peak)
     cents, confidence = estimate_tuning(samples)
     stretch = 1.0
     if confidence >= 0.35 and abs(cents) >= 15:
         samples, stretch = retune(samples, cents)
-    return run_model(samples), stretch
+    return run_model(samples), stretch, samples
 
 
 def examples(samples: np.ndarray, reference: list[tuple[float, int]]) -> dict:
     """Candidates, their features and whether each is a real note; plus what the fixed thresholds would give."""
-    act, stretch = prepare(samples)
+    act, stretch, samples = prepare(samples)
     reference = distinct([(start / stretch, pitch) for start, pitch in reference])
     events = notefilter.candidates(act)
-    detected = [(t0 / FPS, f + MIDI_OFFSET) for t0, _, f, _, _ in events]
+    detected = [(event[0] / FPS, event[2] + MIDI_OFFSET) for event in events]
     baseline = [(n.start, n.pitch) for n in decode_notes(act)]
     return {
-        "x": notefilter.features(act, events),
+        "x": notefilter.features(act, events, notefilter.spectrum(samples)),
         "y": match(detected, reference),
         "n_reference": len(reference),
         "baseline_found": int(match(baseline, reference).sum()),
