@@ -24,7 +24,7 @@ GuitarSet https://zenodo.org/records/3371780 (annotation.zip, audio_mono-mic.zip
 Standard: real piano 89% / 73% · real guitar 83% / 77% · generated 89% / 78%. Melody line 77–95% right. Chord roots 99%.
 High-accuracy mode (`accuracy=piano|guitar`, `high` = piano), ~10× slower (3-min song ≈ 23 s on 4 cores). Evaluate: `python -m tools.evaluate_sheet --real DATASETS --accuracy piano`.
 - piano: real piano 95% / 93% (F 0.82 → 0.94). Used only when it agrees with the standard notes on ≥85% (highres.AGREEMENT); otherwise standard notes kept (guitar/band unchanged).
-- guitar (Riley's GAPS model, trained on classical guitar, MIT): alone it is NOT better than standard (GuitarSet F 0.775 vs 0.799). So it is combined (highres.combine: unsure standard notes need its confirmation, its sure notes are added): GuitarSet 0.799 → 0.807, unseen BabySlakh guitar stems 0.78 → 0.82 (only 6 stems), all 20 stems 0.728 → 0.742. Small gain only.
+- guitar (Riley's GAPS model, trained on classical guitar, MIT): alone it is NOT better than standard (GuitarSet F 0.775 vs 0.799). So it is combined (highres.combine: unsure standard notes need its confirmation, its sure notes are added): GuitarSet 0.799 → 0.807, unseen BabySlakh guitar stems 0.784 → 0.803 (only 6 stems), all 20 stems 0.728 → 0.741. Small gain only.
 - `guitar-gaps-paper-version-12200_iterations.pth` (same HF repo) scores 0.91–0.95 on all GuitarSet players: almost certainly trained on GuitarSet, so it can't be tested fairly here; on unseen BabySlakh guitar it was no better than guitar-gaps. Not used.
 Weakest: singing (~60%), dense full-band mixes.
 
