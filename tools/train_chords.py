@@ -104,7 +104,7 @@ def winterreise(root: str):
         yield name, "winterreise", "test" if name.endswith("SC06") else "train", truth, lambda wav=wav: load_audio(wav)
 
 
-def aam(count: int):
+def aam(count: int, audio_dir: str | None = None):
     from tools.remote_zip import RemoteFile
 
     if count <= 0:
@@ -126,17 +126,23 @@ def aam(count: int):
         split = "train" if k <= 0.75 * count else ("valid" if k <= 0.875 * count else "test")
 
         def load(song=song):
+            kept = os.path.join(audio_dir, f"{song}.npy") if audio_dir else None
+            if kept and os.path.exists(kept):
+                return np.load(kept).astype(np.float32) / 32767
             with tempfile.NamedTemporaryFile(suffix=".flac") as fh:
                 fh.write(mixes.read(f"{song}_mix.flac"))
                 fh.flush()
-                return load_audio(fh.name)
+                x = load_audio(fh.name)
+            if kept:
+                np.save(kept, (np.clip(x, -1, 1) * 32767).astype(np.int16))  # downloading is the slow part
+            return x
 
         yield "aam_" + song, "aam", split, truth, load
 
 
-def collect(root: str, aam_songs: int, have: dict, cache: str | None = None) -> list[dict]:
+def collect(root: str, aam_songs: int, have: dict, cache: str | None = None, audio_dir: str | None = None) -> list[dict]:
     items = []
-    for source in (guitarset(root), winterreise(root), aam(aam_songs)):
+    for source in (guitarset(root), winterreise(root), aam(aam_songs, audio_dir)):
         for name, origin, split, truth, load in source:
             if name in have:
                 have[name]["split"] = split  # the split depends on how many songs are used this time
@@ -227,12 +233,20 @@ def evaluate(items, model) -> tuple[float, float, float]:
     return right / max(total, 1), found / max(changes, 1), real / max(guessed, 1)
 
 
-def fit(items, change: float) -> dict:
-    from sklearn.linear_model import LogisticRegression
-
+def fit(items, change: float, hidden: int = 0) -> dict:
+    """A logistic model, or with `hidden` > 0 a small network with one hidden layer of that size."""
     X, y, w = training_set(items)
-    clf = LogisticRegression(max_iter=3000, C=1.0).fit(X, y, sample_weight=w)
-    return {"coef": clf.coef_, "intercept": clf.intercept_, "change": change}
+    if hidden:
+        from sklearn.neural_network import MLPClassifier
+
+        clf = MLPClassifier(hidden_layer_sizes=(hidden,), alpha=1e-3, max_iter=60, early_stopping=True, random_state=0).fit(X, y, sample_weight=w)
+        layers = [(c, i) for c, i in zip(clf.coefs_, clf.intercepts_)]
+    else:
+        from sklearn.linear_model import LogisticRegression
+
+        clf = LogisticRegression(max_iter=3000, C=1.0).fit(X, y, sample_weight=w)
+        layers = [(clf.coef_.T, clf.intercept_)]
+    return chords._parse_model({"layers": [[a.tolist(), b.tolist()] for a, b in layers], "change": change})
 
 
 def main() -> None:
@@ -240,11 +254,14 @@ def main() -> None:
     parser.add_argument("root")
     parser.add_argument("--cache", help="keep the per-beat profiles in this file between runs")
     parser.add_argument("--aam", type=int, default=400, help="AAM songs to stream (0 = none)")
+    parser.add_argument("--aam-audio", help="keep downloaded AAM songs in this folder (about 8 MB each) for the next run")
     args = parser.parse_args()
     have = {}
     if args.cache and os.path.exists(args.cache):
         have = {item["name"]: item for item in pickle.load(open(args.cache, "rb")) if "source" in item}
-    items = collect(args.root, args.aam, have, args.cache)
+    if args.aam_audio:
+        os.makedirs(args.aam_audio, exist_ok=True)
+    items = collect(args.root, args.aam, have, args.cache, args.aam_audio)
     if args.cache:
         pickle.dump(items, open(args.cache, "wb"))
     train = [i for i in items if i["split"] == "train"]
@@ -274,7 +291,7 @@ def main() -> None:
     print(f"change cost {best[1]} (chosen on the tuning recordings); trained on {len(train) + len(valid)} recordings")
     report("learned model", final)
     with open(chords._MODEL_PATH, "w") as fh:
-        json.dump({"coef": np.round(final["coef"], 5).tolist(), "intercept": np.round(final["intercept"], 5).tolist(), "change": final["change"]}, fh)
+        json.dump({"layers": [[np.round(w, 5).tolist(), np.round(b, 5).tolist()] for w, b in final["layers"]], "change": final["change"]}, fh)
     print(f"wrote {chords._MODEL_PATH}")
 
 

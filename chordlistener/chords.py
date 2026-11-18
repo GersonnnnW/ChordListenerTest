@@ -249,9 +249,27 @@ def _learned() -> dict | None:
         if os.path.exists(_MODEL_PATH) and os.environ.get("CL_CHORD_MODEL", "learned") != "templates":
             with open(_MODEL_PATH) as fh:
                 raw = json.load(fh)
-            model = {"coef": np.array(raw["coef"]), "intercept": np.array(raw["intercept"]), "change": float(raw["change"])}
+            model = _parse_model(raw)
         _model_cache["model"] = model
     return _model_cache["model"]
+
+
+def _parse_model(raw: dict) -> dict:
+    """A one-layer (logistic) or small multi-layer model, as written by tools/train_chords.py."""
+    if "layers" in raw:
+        layers = [(np.array(w), np.array(b)) for w, b in raw["layers"]]
+    else:
+        layers = [(np.array(raw["coef"]).T, np.array(raw["intercept"]))]
+    return {"layers": layers, "change": float(raw["change"])}
+
+
+def _scores(model: dict, x: np.ndarray) -> np.ndarray:
+    """Per row: (not this root, major, minor) scores. Hidden layers use ReLU."""
+    layers = model["layers"]
+    for w, b in layers[:-1]:
+        x = np.maximum(x @ w + b, 0.0)
+    w, b = layers[-1]
+    return x @ w + b
 
 
 def _unit(x: np.ndarray) -> np.ndarray:
@@ -281,7 +299,7 @@ def learned_probabilities(model: dict, treble: np.ndarray, bass: np.ndarray, bar
     scores = np.zeros((n, 12, 3))
     for root in range(12):
         x = np.hstack([np.roll(p, -root, axis=1) for p in parts] + [presence[:, None]])
-        scores[:, root] = x @ model["coef"].T + model["intercept"]
+        scores[:, root] = _scores(model, x)
     # Per root: softmax over (not this root, major, minor).
     e = np.exp(scores - scores.max(axis=2, keepdims=True))
     p = e / e.sum(axis=2, keepdims=True)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -49,7 +51,69 @@ def onset_envelope(samples: np.ndarray, pitch_onsets: np.ndarray | None = None) 
     return (flux / std if std > 0 else flux).astype(np.float64)
 
 
+# ---------------------------------------------------------------- tempo
+#
+# Which pulse is "the beat" is the hard part: music repeats at the beat, at
+# half and double it, and (with swing or triplets) at two and three thirds of
+# it. A small model trained on recordings with known beats (GuitarSet and AAM,
+# tools/train_beats.py) picks among the strongest candidate tempos, from how
+# strongly the music repeats at multiples and fractions of each.
+
+_TEMPO_MODEL = os.path.join(os.path.dirname(__file__), "models", "tempo.json")
+_tempo_model: dict = {}
+TEMPO_MULTIPLES = (0.25, 1 / 3, 0.5, 2 / 3, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
+
+
+def _autocorrelation(env: np.ndarray) -> np.ndarray:
+    n = 1 << int(np.ceil(np.log2(len(env) * 2)))
+    spec = np.fft.rfft(env - env.mean(), n)
+    acf = np.fft.irfft(spec * np.conj(spec))[: len(env)]
+    return acf / max(acf[0], 1e-9)
+
+
+def tempo_candidates(env: np.ndarray, k: int = 10, min_bpm: float = 40.0, max_bpm: float = 240.0) -> list[tuple[float, np.ndarray]]:
+    """The k most periodic tempos, each with the features the tempo model reads."""
+    acf = _autocorrelation(env)
+    lags = np.arange(len(acf))
+    lo, hi = int(60 * FPS / max_bpm), min(int(60 * FPS / min_bpm), len(acf) // 4 - 1)
+    if hi <= lo:
+        return []
+    cand = np.arange(lo, hi + 1, 0.25)
+    base = np.interp(cand, lags, acf) + 0.5 * np.interp(cand * 2, lags, acf)
+    peaks = [i for i in range(1, len(cand) - 1) if base[i] >= base[i - 1] and base[i] >= base[i + 1]]
+    top = max(base.max(), 1e-9)
+    out = []
+    for i in sorted(peaks, key=lambda i: -base[i])[:k]:
+        bpm = 60 * FPS / cand[i]
+        level = np.log2(bpm / 100)
+        features = [np.interp(cand[i] * m, lags, acf) for m in TEMPO_MULTIPLES] + [level, level**2, base[i] / top]
+        out.append((float(bpm), np.array(features)))
+    return out
+
+
+def _learned_tempo() -> dict | None:
+    if "model" not in _tempo_model:
+        model = None
+        if os.path.exists(_TEMPO_MODEL) and os.environ.get("CL_TEMPO_MODEL", "learned") != "classic":
+            with open(_TEMPO_MODEL) as fh:
+                raw = json.load(fh)
+            model = {"coef": np.array(raw["coef"]), "intercept": float(raw["intercept"])}
+        _tempo_model["model"] = model
+    return _tempo_model["model"]
+
+
 def estimate_tempo(env: np.ndarray, min_bpm: float = 45.0, max_bpm: float = 220.0) -> float:
+    """Global tempo of the onset envelope: the learned choice among candidates, or the classic one."""
+    model = _learned_tempo()
+    if model is not None and len(env) >= int(FPS * 2):
+        options = tempo_candidates(env)
+        if options:
+            scores = np.array([f @ model["coef"] + model["intercept"] for _, f in options])
+            return options[int(scores.argmax())][0]
+    return classic_tempo(env, min_bpm, max_bpm)
+
+
+def classic_tempo(env: np.ndarray, min_bpm: float = 45.0, max_bpm: float = 220.0) -> float:
     """Global tempo from the autocorrelation of the onset envelope."""
     if len(env) < int(FPS * 2):
         return 120.0
@@ -77,8 +141,12 @@ def estimate_tempo(env: np.ndarray, min_bpm: float = 45.0, max_bpm: float = 220.
     return float(bpm[int(score.argmax())])
 
 
-def track_beats(env: np.ndarray, bpm: float, tightness: float = 100.0) -> np.ndarray:
+BEAT_TIGHTNESS = float(os.environ.get("CL_BEAT_TIGHTNESS", "100"))  # how strictly beats keep an even pace
+
+
+def track_beats(env: np.ndarray, bpm: float, tightness: float | None = None) -> np.ndarray:
     """Dynamic-programming beat tracker (Ellis, 2007). Returns beat times in seconds."""
+    tightness = BEAT_TIGHTNESS if tightness is None else tightness
     period = 60.0 * FPS / bpm
     n = len(env)
     if n < period * 2:

@@ -14,9 +14,16 @@ import urllib.request
 class RemoteFile(io.RawIOBase):
     def __init__(self, url: str, block: int = 1 << 20):
         self.url, self.block, self.pos = url, block, 0
-        request = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(request, timeout=60) as response:
-            self.size = int(response.headers["Content-Length"])
+        for attempt in range(8):
+            try:
+                request = urllib.request.Request(url, method="HEAD")
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    self.size = int(response.headers["Content-Length"])
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == 7:
+                    raise
+                time.sleep(min(60, 2**attempt))  # busy servers answer 503 now and then
         self._cache: dict[int, bytes] = {}
 
     def readable(self) -> bool:
