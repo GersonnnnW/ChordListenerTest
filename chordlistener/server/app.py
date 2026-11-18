@@ -33,7 +33,8 @@ from ..audio import SNIFF_BYTES, AudioError, looks_like_video, to_mp3
 from ..lyrics import Lyrics, can_place, guess_title_artist, place
 from .. import highres
 from ..pipeline import Analysis, AnalysisOptions, analyze
-from ..document import ARRANGEMENTS, DocumentError, ShowOptions, document_from_analysis, document_view, normalize_document
+from ..document import VIEWS, DocumentError, ShowOptions, document_from_analysis, document_view, normalize_document
+from ..document import tab_text as document_tab
 from ..document import chord_chart as document_chart
 from ..theory import VOCABULARIES
 from .catalog import CatalogError, CatalogProvider, Track, make_provider
@@ -244,7 +245,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         elif row["status"] == "completed":
             body["result"] = load(row).to_dict(transpose=transpose, include_notes=notes)
             base = f"/v1/transcriptions/{row['id']}"
-            body["links"] = {"self": base, "score": base + "/score", "musicxml": base + "/musicxml", "midi": base + "/midi", "chart": base + "/chart", "lyrics": base + "/lyrics"}
+            body["links"] = {"self": base, "score": base + "/score", "musicxml": base + "/musicxml", "midi": base + "/midi", "chart": base + "/chart", "tab": base + "/tab", "lyrics": base + "/lyrics"}
             if row["audio_until"] and row["audio_until"] > time.time() and os.path.exists(audio_path(row["id"])):
                 body["links"]["audio"] = base + "/audio"
                 body["audio_expires_at"] = _iso(row["audio_until"])
@@ -545,7 +546,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
     async def get_musicxml(
         tid: str,
         who: Caller = Depends(caller),
-        arrangement: str = Query("piano", pattern="^(piano|lead)$", description="piano = two staves with all notes; lead = melody line with chord symbols"),
+        arrangement: str = Query("piano", pattern="^(piano|lead|guitar|guitar_melody)$", description="piano = two staves with all notes; lead = melody line with chord symbols; guitar = guitar notation with tablature of all the notes (strummed bars left to the chord symbols); guitar_melody = the same for the melody line"),
         transpose: int = Query(0, ge=-11, le=11),
         notes: bool = Query(True, description="false = chord sheet: rhythm slashes instead of notes"),
         chords: bool = Query(True, description="Print chord symbols"),
@@ -560,6 +561,23 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         doc, _ = current_document(row, original)
         xml = export.musicxml_from_document(doc, arrangement, transpose, show_options(notes, chords, lyrics, tempo, key, capo))
         return Response(xml, media_type="application/vnd.recordare.musicxml+xml", headers=_attachment(json.loads(row["meta"]), f"{arrangement}.musicxml", download))
+
+    @app.get("/v1/transcriptions/{tid}/tab", tags=["Transcriptions"], summary="Guitar tablature as plain text")
+    async def get_tab(
+        tid: str,
+        who: Caller = Depends(caller),
+        source: str = Query("notes", pattern="^(notes|melody)$", description="notes = everything played (best for a guitar recording); melody = the tune only"),
+        transpose: int = Query(0, ge=-11, le=11),
+        chords: bool = Query(True, description="Print chord symbols above the tab"),
+        capo: int = Query(0, ge=0, le=11, description="Print 'Capo N' (use with a negative transpose)"),
+        original: bool = Query(False, description="Ignore saved corrections"),
+        download: bool = False,
+    ):
+        """Each note's string and fret, chosen as a guitarist would play it. Bars of strummed chords are left empty under their chord symbols."""
+        row = owned(tid, who)
+        doc, _ = current_document(row, original)
+        text = document_tab(doc, transpose, "guitar_melody" if source == "melody" else "guitar", show_options(True, chords, False, False, False, capo))
+        return PlainTextResponse(text, headers=_attachment(json.loads(row["meta"]), "tab.txt", download))
 
     @app.get("/v1/transcriptions/{tid}/midi", tags=["Transcriptions"], summary="Detected notes as a MIDI file")
     async def get_midi(tid: str, who: Caller = Depends(caller), transpose: int = Query(0, ge=-11, le=11)):
@@ -654,7 +672,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         transpose = body.get("transpose", 0)
         flags = body.get("show") or {}
         capo = body.get("capo", 0)
-        if arrangement not in ARRANGEMENTS or isinstance(transpose, bool) or not isinstance(transpose, int) or not -11 <= transpose <= 11 or not isinstance(flags, dict):
+        if arrangement not in VIEWS or isinstance(transpose, bool) or not isinstance(transpose, int) or not -11 <= transpose <= 11 or not isinstance(flags, dict):
             raise HTTPException(400, "Invalid arrangement, transpose or show options")
         if isinstance(capo, bool) or not isinstance(capo, int) or not 0 <= capo <= 11:
             raise HTTPException(400, "capo must be a whole number from 0 to 11")
@@ -666,6 +684,8 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
                 out["musicxml"] = export.musicxml_from_document(doc, arrangement, transpose, show)
             if body.get("chart"):
                 out["chart"] = document_chart(doc, transpose, show=show)
+            if body.get("tab"):
+                out["tab"] = document_tab(doc, transpose, arrangement, show)
         except DocumentError as exc:
             raise HTTPException(400, str(exc)) from exc
         return out

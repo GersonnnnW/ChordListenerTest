@@ -32,6 +32,7 @@ class Element:
     tie_out: bool = False
     slash: bool = False  # rhythm slash: "play the chord", no specific notes
     lyric: str = ""
+    frets: tuple[tuple[int, int], ...] = ()  # tablature: (string, fret) per pitch, string 1 = highest
 
 
 @dataclass
@@ -60,7 +61,10 @@ class Score:
     artist: str
     subtitle: str
     n_staves: int
-    clefs: list[str]
+    clefs: list[str]  # G, F, or TAB
+    part_name: str = ""
+    tab_tuning: tuple[int, ...] = ()  # open-string pitches, lowest first, for a TAB staff
+    written_octave_up: bool = False  # guitar: written an octave above where it sounds
 
 
 def _fits(length: int, pos: int, rest: bool, bar: int) -> bool:

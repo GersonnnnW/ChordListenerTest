@@ -858,6 +858,10 @@ async function drawSheet(xml) {
 }
 
 function sheetHint() {
+  if (isTabView() && state.show.notes) {
+    const tip = "Strummed bars are left to the chord symbols.";
+    return state.editing ? `The tab follows the notes: correct them in the ${state.arrangement === "guitar" ? "Piano" : "Lead sheet"} view. ${tip}` : tip;
+  }
   if (!state.editing) return "";
   return state.show.notes ? "Click a note or a rest to change it." : "Turn on Notes to edit the notes.";
 }
@@ -1107,7 +1111,9 @@ $("ly-apply").addEventListener("click", () => {
 
 // ---------------------------------------------------------------- editing: notes on the sheet
 
-const staffEvents = (staff) => state.doc.arrangements[state.arrangement][staff] || [];
+// The guitar views are worked out from the piano notes, so notes are corrected in the Piano view.
+const isTabView = () => state.arrangement === "guitar" || state.arrangement === "guitar_melody";
+const staffEvents = (staff) => (state.doc.arrangements[state.arrangement] || [])[staff] || [];
 const totalSixteenths = () => (state.doc.beats.length - 1) * 4;
 
 function eventAt(staff, position) {
@@ -1122,7 +1128,7 @@ function eventAt(staff, position) {
 /** Make every note and rest on the sheet clickable. */
 function bindSheet() {
   state.hits = [];
-  if (!state.osmd || !state.editing || !state.show.notes) { drawInspector(); return; }
+  if (!state.osmd || !state.editing || !state.show.notes || isTabView()) { drawInspector(); return; }
   const rows = state.osmd.GraphicSheet.MeasureList;
   for (const row of rows) {
     row.forEach((measure, staff) => {
@@ -1455,6 +1461,13 @@ $("dl-xml").addEventListener("click", () => withBusy($("dl-xml"), "preparing…"
 $("dl-chart").addEventListener("click", () => withBusy($("dl-chart"), "preparing…", async () => {
   const out = await renderRequest({ ...downloadChoices(), musicxml: false, chart: true });
   saveBlob(new Blob([out.chart], { type: "text/plain;charset=utf-8" }), `${fileStem()}.chords.txt`);
+}));
+
+$("dl-tab").addEventListener("click", () => withBusy($("dl-tab"), "preparing…", async () => {
+  const choices = downloadChoices();
+  const arrangement = choices.arrangement === "guitar_melody" ? "guitar_melody" : "guitar";
+  const out = await renderRequest({ ...choices, arrangement, musicxml: false, tab: true });
+  saveBlob(new Blob([out.tab], { type: "text/plain;charset=utf-8" }), `${fileStem()}.tab.txt`);
 }));
 
 $("dl-pdf").addEventListener("click", () => withBusy($("dl-pdf"), "Preparing PDF…", async () => {

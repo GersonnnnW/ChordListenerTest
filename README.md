@@ -82,6 +82,7 @@ docker run -p 8000:8000 -v chordlistener-data:/data chordlistener
 
 - **Chords** — one cell per bar, highlighted in time with the audio. Click a bar to jump there. Transpose up or down.
 - **Sheet music** — piano score or lead sheet, drawn in the browser.
+- **Guitar tab** (optional view) — *Guitar tab* writes everything played as guitar notation with tablature under it; *Melody tab* does the same for the tune. Each note goes on the string and fret a guitarist would most likely use (learned from real players: on players the model never saw, 73% of notes land on the very string they used, and the rest are the same note playable elsewhere). Bars where the guitar only strums chords are left empty in the tab, with the chord names above. Download it as PDF, MusicXML or plain-text tab. The tab follows the notes, so correct notes in the Piano view.
 - **Show / hide** — switches for Notes, Chords, Lyrics, Key and BPM. With Notes off the sheet becomes a chord sheet (rhythm slashes with chord symbols and lyrics).
 - **Edit** — fix what the transcription got wrong:
   - *Chords:* click any beat and type the chord (`F#m7`, `Bb/D`, `Csus4`, `N.C.` …). Empty removes it.
@@ -89,7 +90,7 @@ docker run -p 8000:8000 -v chordlistener-data:/data chordlistener
   - *Lyrics:* type under each bar, or paste a whole verse and have it spread across bars.
   - *Title, artist, key, BPM.*
   - **Save** stores the corrected version; **Reset to original** brings back the automatic one. Undo and redo cover the last 60 changes.
-- **Download** — a PDF with a choice of what goes in it: the notes, chords, lyrics, key and tempo, each on or off, as a piano score or a lead sheet. MusicXML, MIDI, a text chord chart and JSON are also offered.
+- **Download** — a PDF with a choice of what goes in it: the notes, chords, lyrics, key and tempo, each on or off, as a piano score, a lead sheet or a guitar tab. MusicXML, MIDI, a text chord chart, a text guitar tab and JSON are also offered.
 
 - **Guitar tip** — when the sounding chords are awkward on guitar (Bbm, Ab, Db…), the page suggests the capo position that turns them into easy shapes (capo 1: Am, G, C) and shows those chords with one click. This is usually why chords "look wrong" next to a chord sheet: sheets are written for the capo, the recording sounds a few semitones higher.
 - **High accuracy** — under the search and upload panels, choose *Standard*, *High accuracy: piano* or *High accuracy: guitar* before choosing a song, or change it with the drop-down next to the result afterwards. It takes about ten times longer. Piano: 95% of written notes right instead of 89%, and 93% of played notes written instead of 73%. Guitar: a smaller gain (see Accuracy). On music that is not the chosen instrument the page says "standard notes kept" and uses the standard notes, which are better there.

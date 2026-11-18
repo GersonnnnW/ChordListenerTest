@@ -150,11 +150,12 @@ curl -H "Authorization: Bearer $KEY" -F "accuracy=guitar" \
 | `transpose` | `0` | Semitones, −11 to 11. Chord names, key and notes are respelled for the new key |
 | `notes` | `true` | `false` leaves out the note list, which is most of the payload |
 
-## Sheet music, MIDI, chord chart
+## Sheet music, guitar tab, MIDI, chord chart
 
 | Endpoint | Returns |
 |---|---|
-| `GET /v1/transcriptions/{id}/musicxml` | MusicXML 4.0. `arrangement=piano` (two staves, all notes) or `arrangement=lead` (melody line) |
+| `GET /v1/transcriptions/{id}/musicxml` | MusicXML 4.0. `arrangement=piano` (two staves, all notes), `lead` (melody line), `guitar` (guitar notation over tablature of everything played) or `guitar_melody` (the same for the melody only) |
+| `GET /v1/transcriptions/{id}/tab` | Plain-text guitar tab with chord symbols above. `source=notes` (everything played; best for a guitar recording) or `melody`; also `transpose`, `chords`, `capo`, `original`, `download` |
 | `GET /v1/transcriptions/{id}/chart` | Plain-text chord chart, one cell per bar, lyrics under each row |
 | `GET /v1/transcriptions/{id}/midi` | Standard MIDI file with the detected notes at their original timing and chord names as markers |
 
@@ -171,6 +172,8 @@ curl -H "Authorization: Bearer $KEY" -F "accuracy=guitar" \
 Also: `transpose` (−11 to 11), `capo=N` to print "Capo N" in the heading (see *Capo chords*), `original=true` to ignore saved corrections, and `download=true` to add a `Content-Disposition: attachment` header. All of these are generated on request and take a few milliseconds. `midi` always contains the notes as detected.
 
 MusicXML opens in MuseScore, Sibelius, Finale, Dorico, Logic and most other notation software, and renders in the browser with OpenSheetMusicDisplay. The website turns it into a PDF in the browser; the API does not produce PDFs.
+
+**Guitar tab.** Each note's string and fret is chosen as a guitarist would play it: the whole piece is fingered at once, following where on the neck real players play and how they move between notes (learned from GuitarSet, where 73% of notes land on the very string the guitarist used, on players never learned from). Bars of strummed chords (most attacks three or more notes at once) are left empty in the tab, with rhythm slashes on the notation staff and the chord symbols above. Standard tuning, or drop D when the music goes below the low E. The tab follows the notes, so corrections saved to the score (`PUT .../score`) carry over. `POST /v1/score/render` also takes `"arrangement": "guitar"` or `"guitar_melody"`, and `"tab": true` to return the text tab as `tab`.
 
 ## The editable score
 

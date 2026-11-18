@@ -8,6 +8,8 @@ from . import __version__
 from .score import DIVISIONS, NOTE_TYPES, Element, Harmony, Score
 from .theory import QUALITIES, Key, spell_midi
 
+_TUNING_STEPS = {0: ("C", 0), 1: ("C", 1), 2: ("D", 0), 3: ("E", -1), 4: ("E", 0), 5: ("F", 0), 6: ("F", 1), 7: ("G", 0), 8: ("A", -1), 9: ("A", 0), 10: ("B", -1), 11: ("B", 0)}
+
 _ACCIDENTALS = {-2: "flat-flat", -1: "flat", 0: "natural", 1: "sharp", 2: "double-sharp"}
 _SHARP_ORDER = "FCGDAEB"
 
@@ -54,6 +56,13 @@ def _lyric(text: str) -> str:
     return f'<lyric number="1"><syllabic>single</syllabic><text>{escape(text)}</text></lyric>' if text else ""
 
 
+def _technical(element: Element, i: int) -> str:
+    if not element.frets:
+        return ""
+    string, fret = element.frets[i]
+    return f"<technical><string>{string}</string><fret>{fret}</fret></technical>"
+
+
 def _note(element: Element, staff: int, voice: int, key: Key, state: dict, bar: int) -> list[str]:
     if element.slash:
         kind, dots = NOTE_TYPES[element.length]
@@ -85,16 +94,17 @@ def _note(element: Element, staff: int, voice: int, key: Key, state: dict, bar: 
         # Print an accidental whenever the pitch departs from what the bar so far implies.
         slot = (staff, step, octave)
         if state.get(slot, state["key"][step]) != alter:
-            if not element.tie_in:
+            if not element.tie_in and not element.frets:
                 parts.append(f"<accidental>{_ACCIDENTALS[alter]}</accidental>")
             state[slot] = alter
         parts.append(f"<staff>{staff}</staff>")
-        if element.tie_in or element.tie_out:
+        if element.tie_in or element.tie_out or element.frets:
             parts.append("<notations>")
             if element.tie_in:
                 parts.append('<tied type="stop"/>')
             if element.tie_out:
                 parts.append('<tied type="start"/>')
+            parts.append(_technical(element, i))
             parts.append("</notations>")
         if i == 0:
             parts.append(_lyric(element.lyric))
@@ -119,7 +129,7 @@ def to_musicxml(score: Score) -> str:
     if score.artist:
         lines.append(f'<creator type="composer">{escape(score.artist)}</creator>')
     lines.append(f"<encoding><software>ChordListener {__version__}</software></encoding></identification>")
-    name = "Piano" if score.n_staves == 2 else "Melody"
+    name = score.part_name or ("Piano" if score.n_staves == 2 else "Melody")
     lines.append(f'<part-list><score-part id="P1"><part-name>{name}</part-name></score-part></part-list>')
     lines.append('<part id="P1">')
 
@@ -132,7 +142,17 @@ def to_musicxml(score: Score) -> str:
             if score.n_staves > 1:
                 attrs.append(f"<staves>{score.n_staves}</staves>")
             for i, sign in enumerate(score.clefs, start=1):
-                attrs.append(f'<clef number="{i}"><sign>{sign}</sign><line>{2 if sign == "G" else 4}</line></clef>')
+                attrs.append(f'<clef number="{i}"><sign>{sign}</sign><line>{ {"G": 2, "F": 4, "TAB": 5}[sign]}</line></clef>')
+            for i, sign in enumerate(score.clefs, start=1):
+                if sign == "TAB" and score.tab_tuning:
+                    attrs.append(f'<staff-details number="{i}"><staff-lines>{len(score.tab_tuning)}</staff-lines>')
+                    for line, pitch in enumerate(score.tab_tuning, start=1):
+                        step, alter = _TUNING_STEPS[pitch % 12]
+                        alter_xml = f"<tuning-alter>{alter}</tuning-alter>" if alter else ""
+                        attrs.append(f'<staff-tuning line="{line}"><tuning-step>{step}</tuning-step>{alter_xml}<tuning-octave>{pitch // 12 - 1}</tuning-octave></staff-tuning>')
+                    attrs.append("</staff-details>")
+            if score.written_octave_up:
+                attrs.append("<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>")
             attrs.append("</attributes>")
             lines.append("".join(attrs))
             if score.bpm is not None:

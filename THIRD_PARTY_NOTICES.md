@@ -42,7 +42,7 @@ Copyright (c) 2015-2026 yWorks GmbH, (c) 2013-2015 Vitaly Puzrin. Licence text: 
 
 ### Training data for the note filter and melody models — CC BY 4.0
 
-`chordlistener/models/notefilter.json` and `chordlistener/models/melody.json` are original models, trained by this project on songs it generated itself and on these datasets:
+`chordlistener/models/notefilter.json`, `chordlistener/models/melody.json` and `chordlistener/models/tabs.json` (guitar fingering habits, from GuitarSet) are original models, trained by this project on songs it generated itself and on these datasets:
 
 - **GuitarSet** — Q. Xi, R. Bittner, J. Pauwels, X. Ye, J. P. Bello, "GuitarSet: A Dataset for Guitar Transcription", ISMIR 2018. <https://zenodo.org/records/3371780>, CC BY 4.0.
 - **vocadito** — R. Bittner, K. Pasalo, J. J. Bosch, G. Meseguer-Brocal, D. Rubinstein, "vocadito: A dataset of solo vocals with f0, note, and lyric annotations", 2021. <https://zenodo.org/records/5578807>, CC BY 4.0.

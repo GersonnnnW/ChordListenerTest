@@ -183,6 +183,8 @@
           <div class="segmented" role="group" aria-label="Arrangement">
             <button type="button" data-arrangement="piano" aria-pressed="true">Piano</button>
             <button type="button" data-arrangement="lead" aria-pressed="false">Lead sheet</button>
+            <button type="button" data-arrangement="guitar" aria-pressed="false" title="Guitar notation and tab of everything played. Bars of strummed chords are left to the chord symbols.">Guitar tab</button>
+            <button type="button" data-arrangement="guitar_melody" aria-pressed="false" title="Guitar notation and tab of the tune only">Melody tab</button>
           </div>
           <span id="sheet-status" class="hint"></span>
         </div>
@@ -217,6 +219,8 @@
         <legend>Layout</legend>
         <label><input type="radio" name="dl-arrangement" value="piano" checked> Piano (two staves)</label>
         <label><input type="radio" name="dl-arrangement" value="lead"> Lead sheet (melody line)</label>
+        <label><input type="radio" name="dl-arrangement" value="guitar"> Guitar tab (everything played)</label>
+        <label><input type="radio" name="dl-arrangement" value="guitar_melody"> Guitar tab (melody only)</label>
       </fieldset>
       <p class="error" id="dl-error" hidden></p>
       <div class="dialog-actions">
@@ -226,6 +230,7 @@
       <p class="hint more">Other formats:
         <button type="button" class="link" id="dl-xml">MusicXML</button> ·
         <button type="button" class="link" id="dl-chart">chord chart (text)</button> ·
+        <button type="button" class="link" id="dl-tab">guitar tab (text)</button> ·
         <a id="dl-midi" href="#">MIDI</a> ·
         <a id="dl-mp3" href="#" hidden>MP3 of your video</a><span id="dl-mp3-dot" hidden> ·</span>
         <a id="dl-json" href="#" target="_blank" rel="noopener">JSON</a>

@@ -30,13 +30,17 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import guitar
+from . import guitar, tabs
 from .arrange import arrange
 from .pipeline import Analysis
-from .score import DIVISIONS, Harmony, Measure, Score, lay_out, slashes, underlay
+from .score import DIVISIONS, Element, Harmony, Measure, Score, lay_out, slashes, underlay
 from .theory import Key, parse_chord_symbol, spell, spell_pc
 
-ARRANGEMENTS = {"piano": 2, "lead": 1}  # name -> number of staves
+ARRANGEMENTS = {"piano": 2, "lead": 1}  # name -> number of staves (stored in the document)
+# What can be shown: the stored arrangements, plus guitar notation with tablature,
+# worked out from the piano arrangement's notes (all of them) or the lead line.
+VIEWS = {**ARRANGEMENTS, "guitar": 2, "guitar_melody": 2}
+TAB_SOURCES = {"guitar": "notes", "guitar_melody": "melody"}
 MAX_BARS = 2000
 _NO_CHORD = {"n.c.", "nc", "n.c", "-", "–"}
 
@@ -301,8 +305,8 @@ def _guitar_tip(chords: list[tuple], key: Key) -> dict | None:
 def score_from_document(doc: dict, arrangement: str = "piano", transpose: int = 0, show: ShowOptions | None = None) -> Score:
     """Lay a (clean) document out as notation."""
     show = show or ShowOptions()
-    if arrangement not in ARRANGEMENTS:
-        raise DocumentError(f"arrangement must be one of: {', '.join(ARRANGEMENTS)}")
+    if arrangement not in VIEWS:
+        raise DocumentError(f"arrangement must be one of: {', '.join(VIEWS)}")
     key = _key(doc, transpose)
     per_bar = doc["beats_per_bar"]
     bar = per_bar * DIVISIONS
@@ -327,7 +331,12 @@ def score_from_document(doc: dict, arrangement: str = "piano", transpose: int = 
     cuts = [{h.offset for h in row} for row in harmonies]
     no_cuts: list[set[int]] = [set() for _ in range(n_bars)]
 
-    if show.notes:
+    part_name, tuning = "", ()
+    if show.notes and arrangement in TAB_SOURCES:
+        tab = tabs.tab_from_document(doc, transpose, TAB_SOURCES[arrangement])
+        staves = _guitar_staves(tab, n_bars, per_bar, cuts)
+        clefs, part_name, tuning = ["G", "TAB"], "Guitar", tabs.TUNINGS[tab.tuning]
+    elif show.notes:
         staves = []
         for index, events in enumerate(doc["arrangements"][arrangement]):
             shifted = [(s, l, tuple(p + transpose for p in ps if 21 <= p + transpose <= 108)) for s, l, ps in events]
@@ -361,7 +370,47 @@ def score_from_document(doc: dict, arrangement: str = "piano", transpose: int = 
         subtitle="  |  ".join(details),
         n_staves=len(staves),
         clefs=clefs,
+        part_name=part_name,
+        tab_tuning=tuning,
+        written_octave_up=bool(tuning),
     )
+
+
+def _guitar_staves(tab: tabs.Tab, n_bars: int, per_bar: int, cuts: list[set[int]]) -> list[list[list[Element]]]:
+    """Guitar notation (written an octave up, as guitar music is) over tablature.
+
+    Strummed bars get rhythm slashes on the notation staff and nothing in the tab:
+    the chord symbols say what to play."""
+    bar = tab.bar_length
+    events = [(n.start, n.length, tuple(p + 12 for p in n.pitches)) for b in tab.bars for n in b.notes]
+    notation = lay_out(events, n_bars, bar, cuts)
+    tablature = lay_out(events, n_bars, bar, [set() for _ in range(n_bars)])
+    starts = {n.start: n for b in tab.bars for n in b.notes}
+    ordered = sorted(starts)
+    for index, elements in enumerate(tablature):
+        for element in elements:
+            if not element.pitches:
+                continue
+            position = index * bar + element.start
+            # The note this piece belongs to (a long note is split into tied pieces).
+            k = int(np.searchsorted(ordered, position, side="right")) - 1
+            note = starts[ordered[k]]
+            where = dict(zip(note.pitches, note.places))
+            element.frets = tuple((6 - where[p - 12][0], where[p - 12][1]) for p in element.pitches)
+    for index, row in enumerate(tab.bars):
+        if row.strummed:
+            notation[index] = [Element(beat * DIVISIONS, DIVISIONS, slash=True) for beat in range(per_bar)]
+    return [notation, tablature]
+
+
+def tab_text(doc: dict, transpose: int = 0, arrangement: str = "guitar", show: ShowOptions | None = None) -> str:
+    """Plain-text guitar tablature with the chord symbols above it."""
+    show = show or ShowOptions()
+    key = _key(doc, transpose)
+    tab = tabs.tab_from_document(doc, transpose, TAB_SOURCES.get(arrangement, "notes"))
+    chords = [(beat * DIVISIONS, _chord_text(symbol, key, transpose)[0]) for beat, symbol in doc["chords"]] if show.chords else []
+    title = " - ".join(t for t in (doc["title"], doc["artist"]) if t)
+    return tabs.tab_text(tab, chords, title, capo=show.capo if show.chords else 0)
 
 
 def build_score(analysis: Analysis, options: ScoreOptions | None = None) -> Score:

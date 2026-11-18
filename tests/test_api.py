@@ -453,3 +453,15 @@ def test_high_accuracy_can_be_switched_off(tmp_path, wav_path):
         assert c.get("/v1/health").json()["high_accuracy"] == []
         assert upload(c, wav_path, data={"accuracy": "high"}).status_code == 400
         assert upload(c, wav_path, data={"accuracy": "guitar"}).status_code == 400
+
+
+def test_guitar_tab(client, wav_path):
+    tid = upload(client, wav_path).json()["id"]
+    text = client.get(f"/v1/transcriptions/{tid}/tab", params={"source": "melody", "download": "true"})
+    assert text.status_code == 200 and "e|" in text.text and ".tab.txt" in text.headers["content-disposition"]
+    xml = client.get(f"/v1/transcriptions/{tid}/musicxml", params={"arrangement": "guitar"})
+    assert xml.status_code == 200 and "<sign>TAB</sign>" in xml.text
+    doc = client.get(f"/v1/transcriptions/{tid}/score").json()["document"]
+    out = client.post("/v1/score/render", json={"document": doc, "arrangement": "guitar_melody", "tab": True}).json()
+    assert "e|" in out["tab"] and "<sign>TAB</sign>" in out["musicxml"]
+    assert client.get(f"/v1/transcriptions/{tid}/tab", params={"source": "bass"}).status_code == 422
