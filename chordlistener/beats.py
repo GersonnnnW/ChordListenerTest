@@ -226,15 +226,66 @@ def fallback_grid(duration: float, bpm: float = 120.0) -> BeatGrid:
     return BeatGrid(np.arange(count) * period, 4, 0)
 
 
-def find_bars(novelty: np.ndarray, accents: np.ndarray, hint: int | None = None) -> tuple[int, int]:
+_BARS_MODEL = os.path.join(os.path.dirname(__file__), "models", "bars.json")
+_bars_model: dict = {}
+
+
+def _standard(v: np.ndarray) -> np.ndarray:
+    s = v.std()
+    return (v - v.mean()) / s if s > 0 else np.zeros_like(v)
+
+
+def bar_candidates(novelty: np.ndarray, accents: np.ndarray, treble: np.ndarray, bass: np.ndarray, hint: int | None = None) -> list[tuple[tuple[int, int], np.ndarray]]:
+    """Each (beats per bar, phase) with what the bar model reads: how much more the
+    harmony and bass change, the low end hits, and the music swells on its bar lines
+    (and half-bars) than elsewhere."""
+    n = len(novelty)
+    unit = bass / np.maximum(np.linalg.norm(bass, axis=1, keepdims=True), 1e-9)
+    bass_change = np.concatenate([[0.0], 1.0 - (unit[1:] * unit[:-1]).sum(axis=1)])[:n]
+    signals = [_standard(novelty), _standard(accents[:n]), _standard(bass_change), _standard(treble.sum(axis=1)[:n])]
+    out = []
+    for per_bar in ([hint] if hint else [4, 3]):
+        for phase in range(per_bar):
+            on = np.zeros(n, bool)
+            on[phase::per_bar] = True
+            half = np.zeros(n, bool)
+            if per_bar == 4:
+                half[(phase + 2) % 4 :: 4] = True
+            features = []
+            for s in signals:
+                features += [s[on].mean() - s[~on].mean(), (s[half].mean() - s[~on & ~half].mean()) if half.any() else 0.0]
+            features.append(1.0 if per_bar == 3 else 0.0)
+            out.append(((per_bar, phase), np.array(features)))
+    return out
+
+
+def _learned_bars() -> dict | None:
+    if "model" not in _bars_model:
+        model = None
+        if os.path.exists(_BARS_MODEL) and os.environ.get("CL_BARS_MODEL", "learned") != "classic":
+            with open(_BARS_MODEL) as fh:
+                raw = json.load(fh)
+            model = {"coef": np.array(raw["coef"]), "intercept": float(raw["intercept"])}
+        _bars_model["model"] = model
+    return _bars_model["model"]
+
+
+def find_bars(novelty: np.ndarray, accents: np.ndarray, hint: int | None = None, treble: np.ndarray | None = None, bass: np.ndarray | None = None) -> tuple[int, int]:
     """Pick the meter (3 or 4 beats per bar) and which beat is the downbeat.
 
     `novelty[i]` is how much the harmony changes at beat i and `accents[i]` how
     strong the low end is there: chords change and bass notes land on bar lines.
+    With the bar model (trained on recordings with known bar lines,
+    tools/train_beats.py) the bass line and loudness count too.
     """
     n = len(novelty)
     if n < 8:
         return hint or 4, 0
+    model = _learned_bars()
+    if model is not None and treble is not None and bass is not None:
+        options = bar_candidates(novelty, accents, treble, bass, hint)
+        scores = [f @ model["coef"] + model["intercept"] for _, f in options]
+        return options[int(np.argmax(scores))][0]
 
     def norm(v: np.ndarray) -> np.ndarray:
         s = v.std()

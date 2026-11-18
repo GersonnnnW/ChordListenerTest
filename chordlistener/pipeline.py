@@ -277,7 +277,7 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
     centre = bounds[:-1].astype(int)
     lo_i, hi_i = np.clip(centre - 6, 0, n_frames), np.clip(centre + 8, 0, n_frames)
     accents = low_cum[hi_i] - low_cum[lo_i]
-    per_bar, phase = find_bars(novelty, accents, options.beats_per_bar)
+    per_bar, phase = find_bars(novelty, accents, options.beats_per_bar, treble, bass)
     bar_position = (np.arange(len(treble)) - phase) % per_bar
 
     spans = ChordRecognizer(options.vocabulary).decode(treble, bass, bar_position, per_bar)
