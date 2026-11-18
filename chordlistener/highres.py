@@ -211,7 +211,7 @@ AGREEMENT = {"piano": 0.85, "guitar": 0.5}
 # mistakes), so the two are combined instead: a standard note the filter was
 # unsure of (confidence below KEEP) stays only if the guitar model heard it too,
 # and a note only the guitar model heard is added when it is sure (from ADD).
-_COMBINE = {"guitar": (0.7, 0.7)}  # instrument: (KEEP, ADD)
+_COMBINE = {"guitar": (0.8, 0.6)}  # instrument: (KEEP, ADD); chosen on GuitarSet player 03 for the fine-tuned model
 _SAME_NOTE = 0.08  # seconds between two detections of one note
 
 
@@ -258,13 +258,33 @@ def combine(standard: list[Note], found: list[Note], keep: float, add: float) ->
     return sorted(notes, key=lambda n: (n.start, n.pitch))
 
 
+SECTION = 20.0  # seconds: a song that is the instrument only in parts is judged section by section
+SECTION_NOTES = 10  # sure standard notes a section needs before it is judged on its own
+
+
 def merge(instrument: str, standard: list[Note], found: list[Note]) -> list[Note] | None:
-    """The notes to write in high-accuracy mode, or None when the music is not this instrument."""
-    if agreement(standard, found) < AGREEMENT[instrument]:
-        return None
+    """The notes to write in high-accuracy mode, or None when the music is not this instrument anywhere."""
     if instrument in _COMBINE:
+        if agreement(standard, found) < AGREEMENT[instrument]:
+            return None
         return combine(standard, found, *_COMBINE[instrument])
-    return found
+    if agreement(standard, found) >= AGREEMENT[instrument]:
+        return found
+    # Not the instrument throughout: perhaps in parts (a piano intro, a solo piano verse).
+    # Each section where the two detectors agree well takes the specialist's notes.
+    end = max([n.end for n in standard] + [n.end for n in found] + [0.0])
+    notes: list[Note] = []
+    used = False
+    for start in np.arange(0.0, end + SECTION, SECTION):
+        ours = [n for n in standard if start <= n.start < start + SECTION]
+        theirs = [n for n in found if start <= n.start < start + SECTION]
+        sure = sum(1 for n in ours if n.confidence >= 0.5)
+        if sure >= SECTION_NOTES and agreement(ours, theirs) >= AGREEMENT[instrument]:
+            notes += theirs
+            used = True
+        else:
+            notes += ours
+    return sorted(notes, key=lambda n: (n.start, n.pitch)) if used else None
 
 
 def transcribe(samples: np.ndarray, instrument: str = "piano") -> list[Note]:

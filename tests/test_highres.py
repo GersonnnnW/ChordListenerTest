@@ -113,3 +113,18 @@ def test_guitar_mode(wav_path):
     result = analyze(wav_path, AnalysisOptions(accuracy="guitar"))
     assert result.accuracy == "guitar" and result.note_detector in ("guitar", "standard")
     assert result.notes and "guitar_model_ms" in result.timings
+
+
+def test_piano_in_parts_is_judged_section_by_section():
+    from chordlistener.pitch import Note
+
+    # 30 s where both detectors agree (piano), then 30 s where they do not.
+    standard = [Note(t * 0.5, t * 0.5 + 0.4, 60 + t % 12, 0.8, 0.9) for t in range(120)]
+    found = [Note(n.start, n.end, n.pitch, 0.7, 0.9) for n in standard[:60]] + [Note(30 + k, 30.5 + k, 40, 0.7, 0.9) for k in range(30)]
+    merged = highres.merge("piano", standard, found)
+    assert merged is not None
+    early = [n for n in merged if n.start < 20]
+    late = [n for n in merged if n.start >= 40]
+    assert all(n.velocity == 0.7 for n in early)  # the piano part: the piano model's notes
+    assert all(n.velocity == 0.8 for n in late)  # the rest: the standard notes
+    assert highres.merge("piano", standard, []) is None
