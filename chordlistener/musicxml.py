@@ -56,11 +56,31 @@ def _lyric(text: str) -> str:
     return f'<lyric number="1"><syllabic>single</syllabic><text>{escape(text)}</text></lyric>' if text else ""
 
 
+_LEGATO = {"h": ("hammer-on", "H"), "p": ("pull-off", "P")}
+
+
 def _technical(element: Element, i: int) -> str:
-    if not element.frets:
-        return ""
-    string, fret = element.frets[i]
-    return f"<technical><string>{string}</string><fret>{fret}</fret></technical>"
+    parts = []
+    if element.joined in _LEGATO:
+        parts.append(f'<{_LEGATO[element.joined][0]} number="1" type="stop"/>')
+    if element.joins in _LEGATO:
+        name, letter = _LEGATO[element.joins]
+        parts.append(f'<{name} number="1" type="start">{letter}</{name}>')
+    if element.frets:
+        string, fret = element.frets[i]
+        parts.append(f"<string>{string}</string><fret>{fret}</fret>")
+    if element.bend and i == 0:
+        parts.append(f"<bend><bend-alter>{element.bend}</bend-alter></bend>")
+    return f"<technical>{''.join(parts)}</technical>" if parts else ""
+
+
+def _slides(element: Element) -> str:
+    out = ""
+    if element.joined in ("/", "\\"):
+        out += '<slide number="1" type="stop"/>'
+    if element.joins in ("/", "\\"):
+        out += '<slide number="1" type="start" line-type="solid"/>'
+    return out
 
 
 def _note(element: Element, staff: int, voice: int, key: Key, state: dict, bar: int) -> list[str]:
@@ -98,13 +118,14 @@ def _note(element: Element, staff: int, voice: int, key: Key, state: dict, bar: 
                 parts.append(f"<accidental>{_ACCIDENTALS[alter]}</accidental>")
             state[slot] = alter
         parts.append(f"<staff>{staff}</staff>")
-        if element.tie_in or element.tie_out or element.frets:
+        extra = _technical(element, i) + (_slides(element) if i == 0 else "")
+        if element.tie_in or element.tie_out or extra:
             parts.append("<notations>")
             if element.tie_in:
                 parts.append('<tied type="stop"/>')
             if element.tie_out:
                 parts.append('<tied type="start"/>')
-            parts.append(_technical(element, i))
+            parts.append(extra)
             parts.append("</notations>")
         if i == 0:
             parts.append(_lyric(element.lyric))

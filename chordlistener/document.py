@@ -14,6 +14,7 @@ trip without the engine having to understand "edits".
       "beats": [0.51, 1.33, ...],                 # seconds; bars * beats_per_bar + 1 entries
       "chords": [[0, "C"], [4, "G"], ...],        # [beat index, symbol as written]
       "lyrics": {"0": "When I find myself", ...}, # bar index -> words sung in that bar
+      "techniques": [[16, 64, "h"], ...],         # guitar: [start, pitch, how it was reached] (h p / \\ b)
       "arrangements": {
         "piano": [[[start, length, [pitches]], ...], [...]],   # one list per staff
         "lead":  [[[start, length, [pitches]], ...]]
@@ -31,7 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import guitar, tabs
-from .arrange import arrange
+from .arrange import arrange, quantise
 from .pipeline import Analysis
 from .score import DIVISIONS, Element, Harmony, Measure, Score, lay_out, slashes, underlay
 from .theory import Key, parse_chord_symbol, spell, spell_pc
@@ -41,6 +42,7 @@ ARRANGEMENTS = {"piano": 2, "lead": 1}  # name -> number of staves (stored in th
 # worked out from the piano arrangement's notes (all of them) or the lead line.
 VIEWS = {**ARRANGEMENTS, "guitar": 2, "guitar_melody": 2}
 TAB_SOURCES = {"guitar": "notes", "guitar_melody": "melody"}
+TECHNIQUES = ("h", "p", "/", "\\", "b")  # hammer-on, pull-off, slide up, slide down, bent up to
 MAX_BARS = 2000
 _NO_CHORD = {"n.c.", "nc", "n.c", "-", "–"}
 
@@ -94,6 +96,11 @@ def document_from_analysis(analysis: Analysis, title: str = "", artist: str = ""
     def staff(events) -> list[list]:
         return [[start, length, list(pitches)] for start, length, pitches in events]
 
+    # Hammer-ons, pull-offs and slides, at the positions the notes are written at.
+    sources: list[int] = []
+    placed, _ = quantise(analysis, total, sources=sources)
+    marks = sorted({(q[0], q[2], analysis.notes[i].technique) for q, i in zip(placed, sources) if analysis.notes[i].technique})
+
     return {
         "version": 1,
         "title": title,
@@ -104,6 +111,7 @@ def document_from_analysis(analysis: Analysis, title: str = "", artist: str = ""
         "beats": [round(float(t), 3) for t in grid.times[: n_bars * grid.per_bar + 1]],
         "chords": chords,
         "lyrics": {},
+        "techniques": [list(m) for m in marks],
         "arrangements": {"piano": [staff(arrangement.right), staff(arrangement.left)], "lead": [staff(arrangement.melody)]},
     }
 
@@ -181,6 +189,15 @@ def normalize_document(raw) -> dict:
         if text:
             lyrics[str(int(bar_key))] = text
 
+    techniques_in = raw.get("techniques", [])
+    if not isinstance(techniques_in, list) or len(techniques_in) > total:
+        raise DocumentError("techniques must be a list of [start, pitch, kind]")
+    marks = set()
+    for item in techniques_in:
+        if not isinstance(item, (list, tuple)) or len(item) != 3 or item[2] not in TECHNIQUES:
+            raise DocumentError(f"each technique must be [start, pitch, kind] with kind one of {' '.join(TECHNIQUES)}")
+        marks.add((_integer(item[0], 0, total - 1, "A technique's start"), _integer(item[1], 21, 108, "A technique's pitch"), item[2]))
+
     arrangements_in = raw.get("arrangements")
     if not isinstance(arrangements_in, dict):
         raise DocumentError("arrangements is missing")
@@ -222,6 +239,7 @@ def normalize_document(raw) -> dict:
         "beats": clean_beats,
         "chords": [[beat, by_beat[beat]] for beat in sorted(by_beat)],
         "lyrics": lyrics,
+        "techniques": [list(m) for m in sorted(marks)],
         "arrangements": arrangements,
     }
 
@@ -387,16 +405,26 @@ def _guitar_staves(tab: tabs.Tab, n_bars: int, per_bar: int, cuts: list[set[int]
     tablature = lay_out(events, n_bars, bar, [set() for _ in range(n_bars)])
     starts = {n.start: n for b in tab.bars for n in b.notes}
     ordered = sorted(starts)
-    for index, elements in enumerate(tablature):
-        for element in elements:
-            if not element.pitches:
-                continue
-            position = index * bar + element.start
-            # The note this piece belongs to (a long note is split into tied pieces).
-            k = int(np.searchsorted(ordered, position, side="right")) - 1
-            note = starts[ordered[k]]
-            where = dict(zip(note.pitches, note.places))
-            element.frets = tuple((6 - where[p - 12][0], where[p - 12][1]) for p in element.pitches)
+    following = {ordered[i]: starts[ordered[i + 1]] for i in range(len(ordered) - 1)}
+    for staff, rows in enumerate((notation, tablature)):
+        for index, elements in enumerate(rows):
+            for element in elements:
+                if not element.pitches:
+                    continue
+                position = index * bar + element.start
+                # The note this piece belongs to (a long note is split into tied pieces).
+                k = int(np.searchsorted(ordered, position, side="right")) - 1
+                note = starts[ordered[k]]
+                if staff == 1:
+                    where = dict(zip(note.pitches, note.places))
+                    element.frets = tuple((6 - where[p - 12][0], where[p - 12][1]) for p in element.pitches)
+                nxt = following.get(note.start)
+                if not element.tie_in and note.technique:
+                    element.joined = note.technique
+                if not element.tie_out and nxt is not None and nxt.technique:
+                    element.joins = nxt.technique
+                if not element.tie_in and note.bend:
+                    element.bend = note.bend
     for index, row in enumerate(tab.bars):
         if row.strummed:
             notation[index] = [Element(beat * DIVISIONS, DIVISIONS, slash=True) for beat in range(per_bar)]

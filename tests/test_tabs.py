@@ -64,3 +64,27 @@ def test_guitar_views_of_a_score(analysis):
         assert "<sign>TAB</sign>" in xml and "<staff-lines>6</staff-lines>" in xml and "<octave-change>-1</octave-change>" in xml
         assert "<fret>" in xml and "<part-name>Guitar</part-name>" in xml
     assert "e|" in tab_text(doc) and "e|" in tab_text(doc, arrangement="guitar_melody")
+
+
+def test_techniques_in_the_tab():
+    events = [(0, 2, (57,)), (2, 2, (59,)), (4, 2, (57,)), (8, 2, (64,)), (10, 4, (66,))]
+    marks = {(2, 59): "h", (4, 57): "p", (10, 66): "b"}
+    tab = tabs.tab_from_events(events, 1, 16, marks=marks)
+    notes = tab.bars[0].notes
+    assert [n.technique for n in notes] == ["", "h", "p", ""]
+    assert notes[0].places[0][0] == notes[1].places[0][0] == notes[2].places[0][0]  # joined notes share a string
+    assert notes[3].bend == 2 and notes[3].length == 6  # the bent-to note is folded into the bend
+    text = tabs.tab_text(tab, [])
+    assert "h" in text and "p" in text and f"{notes[3].places[0][1]}b{notes[3].places[0][1] + 2}" in text
+
+
+def test_techniques_in_musicxml():
+    doc = normalize_document({
+        "version": 1, "title": "", "artist": "", "key": {"tonic": 9, "minor": True}, "bpm": 100, "beats_per_bar": 4,
+        "beats": [i * 0.6 for i in range(5)], "chords": [], "lyrics": {},
+        "techniques": [[2, 59, "h"], [8, 64, "/"], [10, 66, "b"]],
+        "arrangements": {"piano": [[[0, 2, [57]], [2, 2, [59]], [6, 2, [62]], [8, 2, [64]], [10, 4, [66]]], []], "lead": [[]]},
+    })
+    xml = to_musicxml(score_from_document(doc, "guitar"))
+    assert '<hammer-on number="1" type="start">H</hammer-on>' in xml and '<slide number="1" type="start"' in xml
+    assert "<bend><bend-alter>2</bend-alter></bend>" in xml

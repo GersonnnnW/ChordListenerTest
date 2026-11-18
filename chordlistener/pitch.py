@@ -56,6 +56,7 @@ class Activations:
 
     frames: np.ndarray  # (T, 88) probability a pitch is sounding
     onsets: np.ndarray  # (T, 88) probability a note starts
+    contour: np.ndarray | None = None  # (T, 264) fine pitch, three steps per semitone from A0
 
 
 def run_model(samples: np.ndarray) -> Activations:
@@ -66,21 +67,24 @@ def run_model(samples: np.ndarray) -> Activations:
     need = (n_windows - 1) * _STEP + _WINDOW
     if len(padded) < need:
         padded = np.concatenate([padded, np.zeros(need - len(padded), dtype=np.float32)])
-    frames, onsets = [], []
+    frames, onsets, contours = [], [], []
     name = session.get_inputs()[0].name
     for start in range(0, n_windows, _BATCH):
         idx = range(start, min(start + _BATCH, n_windows))
         batch = np.stack([padded[i * _STEP : i * _STEP + _WINDOW] for i in idx])[:, :, None]
-        note, onset = session.run(["StatefulPartitionedCall:1", "StatefulPartitionedCall:2"], {name: batch})
+        contour, note, onset = session.run(["StatefulPartitionedCall:0", "StatefulPartitionedCall:1", "StatefulPartitionedCall:2"], {name: batch})
         frames.append(note[:, _TRIM:-_TRIM].reshape(-1, N_PITCHES))
         onsets.append(onset[:, _TRIM:-_TRIM].reshape(-1, N_PITCHES))
+        contours.append(contour[:, _TRIM:-_TRIM].reshape(-1, contour.shape[-1]))
     frames_out, onsets_out = np.concatenate(frames)[:n_out], np.concatenate(onsets)[:n_out]
+    contour_out = np.concatenate(contours)[:n_out]
     # The network normalises its input, so on silence it amplifies the noise
     # floor into phantom notes. Mute frames that are ~50 dB below the music.
     audible = _audible(samples, n_out)
     frames_out[~audible] = 0
     onsets_out[~audible] = 0
-    return Activations(frames_out, onsets_out)
+    contour_out[~audible] = 0
+    return Activations(frames_out, onsets_out, contour_out)
 
 
 def _audible(samples: np.ndarray, n_frames: int) -> np.ndarray:
@@ -100,6 +104,8 @@ class Note:
     pitch: int  # MIDI number
     velocity: float  # 0..1
     confidence: float = 1.0  # how sure the note filter is that this was really played
+    technique: str = ""  # guitar: how it was reached from the previous note: h, p, /, \\ (slide up/down) or b (bent up to)
+    bend: float = 0.0  # guitar: semitones the note itself is bent up
 
     def to_dict(self) -> dict:
         return {"start": round(self.start, 3), "end": round(self.end, 3), "pitch": self.pitch, "velocity": round(self.velocity, 3), "confidence": round(self.confidence, 2)}

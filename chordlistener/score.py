@@ -33,6 +33,9 @@ class Element:
     slash: bool = False  # rhythm slash: "play the chord", no specific notes
     lyric: str = ""
     frets: tuple[tuple[int, int], ...] = ()  # tablature: (string, fret) per pitch, string 1 = highest
+    joins: str = ""  # guitar technique leading to the next note: h p / \\
+    joined: str = ""  # guitar technique this note was reached by
+    bend: int = 0  # semitones this note is bent up
 
 
 @dataclass

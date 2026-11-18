@@ -47,6 +47,8 @@ class TabNote:
     length: int
     pitches: tuple[int, ...]
     places: tuple[tuple[int, int], ...]  # (string, fret) per pitch; string 0 = lowest
+    technique: str = ""  # how this note was reached from the previous one: h p / \\
+    bend: int = 0  # semitones this note is bent up (a bent-to note is folded into the note it bends from)
 
 
 @dataclass
@@ -102,12 +104,14 @@ def _lead(places) -> tuple[int, int]:
     return max(places)
 
 
-def place(groups: list[tuple[float, tuple[int, ...]]], tuning: tuple[int, ...]) -> list[tuple[tuple[int, int], ...]]:
+def place(groups: list[tuple[float, tuple[int, ...]]], tuning: tuple[int, ...], joined: list[bool] | None = None) -> list[tuple[tuple[int, int], ...]]:
     """Choose a fingering for each (time in beats, pitches) group: the most guitarist-like path.
 
     Costs are -log probabilities counted from GuitarSet: where on the neck each
     note is played (string, fret), and how the leading note moves between groups
-    (strings across, frets along, given the time between them).
+    (strings across, frets along, given the time between them). A group marked in
+    `joined` (a hammer-on, pull-off or slide from the one before) must stay on the
+    same string.
     """
     if not groups:
         return []
@@ -123,6 +127,8 @@ def place(groups: list[tuple[float, tuple[int, ...]]], tuning: tuple[int, ...]) 
         across = leads[i][None, :, 0] - leads[i - 1][:, None, 0] + 5
         along = np.clip(leads[i][None, :, 1] - leads[i - 1][:, None, 1], -MAX_SHIFT, MAX_SHIFT) + MAX_SHIFT
         total = best[:, None] + table[across, along]
+        if joined and joined[i]:
+            total = total + 1e6 * (across != 5)  # a hammer-on, pull-off or slide stays on its string
         links = total.argmin(axis=0)
         best = total[links, np.arange(len(links))] + statics[i]
         back.append(links)
@@ -180,8 +186,12 @@ def strummed(groups: list[tuple[int, ...]]) -> bool:
     return sum(len(g) >= 3 for g in groups) * 2 >= len(groups)
 
 
-def tab_from_events(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int, bar: int, beat: int = 4) -> Tab:
-    """Tablature for note events (start, length, pitches) in sixteenths."""
+def tab_from_events(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int, bar: int, beat: int = 4, marks: dict | None = None) -> Tab:
+    """Tablature for note events (start, length, pitches) in sixteenths.
+
+    marks: {(start, pitch): technique} for single notes reached by a hammer-on (h),
+    pull-off (p), slide (/ or \\) or bend (b) from the note before."""
+    marks = marks or {}
     by_bar: list[list[tuple[int, int, tuple[int, ...]]]] = [[] for _ in range(n_bars)]
     for start, length, pitches in sorted(events):
         if 0 <= start // bar < n_bars and pitches:
@@ -200,9 +210,33 @@ def tab_from_events(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int,
             kept = playable(pitches, tuning)
             if kept:
                 todo.append((index, start, length, kept))
-    places = place([(start / beat, pitches) for _, start, _, pitches in todo], tuning)
-    for (index, start, length, pitches), chosen in zip(todo, places):
-        bars[index].notes.append(TabNote(start, length, pitches, tuple(chosen)))
+    # A technique joins a single note to the single note just before it.
+    kinds = []
+    for k, (_, start, _, pitches) in enumerate(todo):
+        kind = marks.get((start, pitches[0]), "") if len(pitches) == 1 else ""
+        if kind and (k == 0 or len(todo[k - 1][3]) != 1 or todo[k - 1][3][0] == pitches[0]):
+            kind = ""
+        if kind == "b" and not 1 <= pitches[0] - todo[k - 1][3][0] <= 3:
+            kind = ""  # a bend reaches up to three semitones
+        kinds.append(kind)
+    # A bent-to note is played at the fret of the note it bends from, so it is not fingered itself.
+    fingered = [k for k, kind in enumerate(kinds) if kind != "b"]
+    joined = [bool(kinds[k]) and (i > 0 and fingered[i - 1] == k - 1) for i, k in enumerate(fingered)]
+    chosen_for = dict(zip(fingered, place([(todo[k][1] / beat, todo[k][3]) for k in fingered], tuning, joined)))
+    previous = None
+    for k, (index, start, length, pitches) in enumerate(todo):
+        kind = kinds[k]
+        if kind == "b" and previous is not None:
+            # Bent up to: one note, held through, bent at its own fret.
+            previous.bend = pitches[0] - previous.pitches[0]
+            previous.length = start + length - previous.start
+            continue
+        chosen = tuple(chosen_for[k])
+        if kind and (previous is None or previous.places[0][0] != chosen[0][0]):
+            kind = ""  # could not be kept on one string
+        note = TabNote(start, length, pitches, tuple(chosen), kind)
+        bars[index].notes.append(note)
+        previous = note
     return Tab(name, bars, bar)
 
 
@@ -228,7 +262,11 @@ def tab_from_document(doc: dict, transpose: int = 0, source: str = "notes") -> T
         if i + 1 < len(starts):
             length = min(length, starts[i + 1] - start)  # one line: a note ends where the next begins
         events.append((start, length, tuple(sorted(ps))))
-    return tab_from_events(events, n_bars, bar)
+    marks = {}
+    for start, pitch, kind in doc.get("techniques", []):
+        for octave in (0, 12):  # a melody line may be written an octave up
+            marks[(start, pitch + transpose + octave)] = kind
+    return tab_from_events(events, n_bars, bar, marks=marks)
 
 
 # ---------------------------------------------------------------- plain-text tablature
@@ -249,6 +287,8 @@ def tab_text(tab: Tab, chords: list[tuple[int, str]], title: str = "", bars_per_
         head.append("Tuning: drop D (D A D G B E)")
     if capo:
         head.append(f"Capo {capo}")
+    if any(n.technique or n.bend for b in tab.bars for n in b.notes):
+        head.append("h hammer-on   p pull-off   / \\ slide up/down   b bend (7b9: fret 7 bent up to the pitch of fret 9)")
     out = ["\n".join(head) + "\n" if head else ""]
     for first in range(0, len(tab.bars), bars_per_line):
         row = tab.bars[first : first + bars_per_line]
@@ -262,10 +302,13 @@ def tab_text(tab: Tab, chords: list[tuple[int, str]], title: str = "", bars_per_
             for note in bar.notes:
                 col = base + 1 + (note.start - (first + k) * tab.bar_length) * width
                 for string, fret in note.places:
-                    text = str(fret)
+                    line = lines[5 - string]
+                    text = f"{fret}b{fret + note.bend}" if note.bend else str(fret)
                     for i, ch in enumerate(text):
                         if col + i < cells - 1:
-                            lines[5 - string][col + i] = ch
+                            line[col + i] = ch
+                    if note.technique and col - 1 > base and line[col - 1] == "-":
+                        line[col - 1] = note.technique
         for line in lines:
             line[-1] = "|"
         bar_start, bar_end = first * tab.bar_length, (first + len(row)) * tab.bar_length

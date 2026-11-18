@@ -4,7 +4,7 @@ __version__ = "0.1.0"
 
 # Bump when the analysis output would change for the same audio. Cached results
 # are keyed on this, so old cache entries are ignored after an engine change.
-ENGINE_VERSION = "4"
+ENGINE_VERSION = "5"
 
 from .pipeline import Analysis, AnalysisOptions, analyze, analyze_samples  # noqa: E402
 

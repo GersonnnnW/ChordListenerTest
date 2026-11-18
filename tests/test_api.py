@@ -4,6 +4,7 @@ import shutil
 import pytest
 from fastapi.testclient import TestClient
 
+from chordlistener import ENGINE_VERSION
 from chordlistener.server.app import create_app
 from chordlistener.server.catalog import CatalogProvider, Track
 from chordlistener.lyrics import Lyrics
@@ -398,7 +399,7 @@ def test_capo_and_guitar_tip(client, wav_path):
 
 def test_health_reports_limits(client):
     health = client.get("/v1/health").json()
-    assert health["max_upload_mb"] == 1000 and health["engine_version"] == "4"
+    assert health["max_upload_mb"] == 1000 and health["engine_version"] == ENGINE_VERSION
 
 
 needs_piano = pytest.mark.skipif(not __import__("chordlistener.highres").highres.available("piano"), reason="piano model not installed")

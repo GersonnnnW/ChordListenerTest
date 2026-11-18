@@ -11,7 +11,7 @@ from . import ENGINE_VERSION
 from .audio import SAMPLE_RATE, load_audio
 from .beats import BeatGrid, estimate_tempo, fallback_grid, find_bars, onset_envelope, track_beats
 from .chords import ChordRecognizer, estimate_key, segment_chroma
-from . import highres, notefilter
+from . import highres, notefilter, techniques
 from .pitch import FPS, MIDI_OFFSET, Note, decode_notes, run_model
 from .theory import QUALITIES, Chord, Key, note_name, spell_pc
 from .tuning import estimate_tuning, retune
@@ -118,6 +118,7 @@ class Analysis:
                     "name": note_name(n.pitch + transpose, key),
                     "velocity": round(n.velocity, 3),
                     "confidence": round(n.confidence, 2),
+                    **({"technique": n.technique} if n.technique else {}),
                 }
                 for n in self.notes
                 if 0 <= n.pitch + transpose <= 127
@@ -137,7 +138,7 @@ class Analysis:
                 [round(c.start, 4), round(c.end, 4), c.chord.root if c.chord else -1, c.chord.quality if c.chord else "", -1 if not c.chord or c.chord.bass is None else c.chord.bass, c.confidence, c.beat]
                 for c in self.chords
             ],
-            "notes": [[round(n.start, 4), round(n.end, 4), n.pitch, round(n.velocity, 3), round(n.confidence, 2)] for n in self.notes],
+            "notes": [[round(n.start, 4), round(n.end, 4), n.pitch, round(n.velocity, 3), round(n.confidence, 2), n.technique, n.bend] for n in self.notes],
             "ms": self.processing_ms,
             "tuning": [round(self.tuning_cents, 1), self.tuning_corrected],
             "accuracy": [self.accuracy, self.note_detector],
@@ -248,6 +249,7 @@ def _analyze(samples: np.ndarray, options: AnalysisOptions) -> Analysis:
         if merged is not None:
             notes, detector = merged, accuracy
         timings[f"{accuracy}_model_ms"] = int((time.perf_counter() - t0) * 1000)
+    techniques.detect(notes, act.contour)
 
     t0 = time.perf_counter()
     env = onset_envelope(samples, act.onsets)
