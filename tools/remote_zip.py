@@ -6,6 +6,8 @@ zipfile only needs seek() and read(); HTTP range requests provide both.
 from __future__ import annotations
 
 import io
+import time
+import urllib.error
 import urllib.request
 
 
@@ -13,8 +15,7 @@ class RemoteFile(io.RawIOBase):
     def __init__(self, url: str, block: int = 1 << 20):
         self.url, self.block, self.pos = url, block, 0
         request = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(request) as response:
-            self.url = response.url  # follow redirects once
+        with urllib.request.urlopen(request, timeout=60) as response:
             self.size = int(response.headers["Content-Length"])
         self._cache: dict[int, bytes] = {}
 
@@ -32,9 +33,19 @@ class RemoteFile(io.RawIOBase):
         return self.pos
 
     def _range(self, start: int, end: int) -> bytes:
-        request = urllib.request.Request(self.url, headers={"Range": f"bytes={start}-{end - 1}"})
-        with urllib.request.urlopen(request) as response:
-            return response.read()
+        """Bytes start..end, retried with growing pauses: big archives on busy servers fail now and then."""
+        for attempt in range(8):
+            try:
+                request = urllib.request.Request(self.url, headers={"Range": f"bytes={start}-{end - 1}"})
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    data = response.read()
+                if len(data) == end - start:
+                    return data
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == 7:
+                    raise
+            time.sleep(min(60, 2**attempt))
+        raise OSError(f"could not read bytes {start}-{end} of {self.url}")
 
     def read(self, n: int = -1) -> bytes:
         if n is None or n < 0:
