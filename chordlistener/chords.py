@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -144,6 +146,9 @@ class ChordRecognizer:
         n_seg = len(treble)
         if n_seg == 0:
             return []
+        model = _learned()
+        if model is not None:
+            return self._decode_learned(model, treble, bass, bar_position)
         em = self.emissions(treble, bass)
         n_states = em.shape[1]
         # Chords mostly change on bar lines (then mid-bar), so changing
@@ -183,6 +188,113 @@ class ChordRecognizer:
                 spans.append(ChordSpan(start, i, chord, round(confidence, 3)))
                 start = i
         return spans
+
+
+    def _decode_learned(self, model: dict, treble: np.ndarray, bass: np.ndarray, bar_position: np.ndarray | None) -> list[ChordSpan]:
+        """Root and major/minor from the learned model; the exact chord type from the templates."""
+        probs = learned_probabilities(model, treble, bass, bar_position)
+        em = np.log(probs + 1e-6)
+        n_seg, n_states = em.shape
+        cost = model["change"]
+        score = em[0].copy()
+        back = np.zeros((n_seg, n_states), dtype=np.int32)
+        for i in range(1, n_seg):
+            best = int(score.argmax())
+            switch = score[best] - cost
+            stay = score >= switch
+            back[i] = np.where(stay, np.arange(n_states), best)
+            score = np.where(stay, score, switch) + em[i]
+        path = np.empty(n_seg, dtype=np.int32)
+        path[-1] = int(score.argmax())
+        for i in range(n_seg - 1, 0, -1):
+            path[i - 1] = back[i, path[i]]
+
+        templates = self.emissions(treble, bass)[:, : self.n]
+        spans: list[ChordSpan] = []
+        start = 0
+        for i in range(1, n_seg + 1):
+            if i == n_seg or path[i] != path[start]:
+                state = int(path[start])
+                chord, confidence = None, 0.0
+                if state < 24:
+                    root, family = state % 12, ("maj" if state < 12 else "min")
+                    # Which chord of that family (C, C7, Cmaj7, Csus4...) fits the notes best.
+                    candidates = [k for k, (r, q) in enumerate(self.states) if r == root and _minorish(q) == (family == "min")]
+                    k = max(candidates, key=lambda c: float(templates[start:i, c].mean())) if candidates else None
+                    quality = self.states[k][1] if k is not None else family
+                    chord = Chord(root, quality, _slash_bass(root, quality, bass[start:i].sum(axis=0)))
+                    confidence = float(probs[start:i, state].mean())
+                spans.append(ChordSpan(start, i, chord, round(confidence, 3)))
+                start = i
+        return spans
+
+
+# ---------------------------------------------------------------- the learned model
+#
+# Trained on real guitar accompaniment with timed chord labels (GuitarSet,
+# players 00-03; tools/train_chords.py). One small logistic model, shared by
+# all twelve roots: rotate the pitch-class profiles so the candidate root is at
+# C, and it says how likely this beat is a major chord, a minor chord, or
+# neither on that root. It sees the beat, its neighbours and its whole bar, so
+# a passing note (the sixth in a boogie riff) does not flip the chord.
+
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "chords.json")
+_model_cache: dict = {}
+
+
+def _learned() -> dict | None:
+    if "model" not in _model_cache:
+        model = None
+        if os.path.exists(_MODEL_PATH) and os.environ.get("CL_CHORD_MODEL", "learned") != "templates":
+            with open(_MODEL_PATH) as fh:
+                raw = json.load(fh)
+            model = {"coef": np.array(raw["coef"]), "intercept": np.array(raw["intercept"]), "change": float(raw["change"])}
+        _model_cache["model"] = model
+    return _model_cache["model"]
+
+
+def _unit(x: np.ndarray) -> np.ndarray:
+    return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-9)
+
+
+def beat_features(treble: np.ndarray, bass: np.ndarray, bar_position: np.ndarray | None) -> tuple[list[np.ndarray], np.ndarray]:
+    """The profiles the model reads per beat (before rotation), and how present the music is."""
+    energy = treble.sum(axis=1)
+    reference = np.percentile(energy, 90) if len(energy) else 1.0
+    presence = np.clip(energy / max(0.2 * reference, 1e-9), 0.0, 1.0)
+    t, b = _unit(treble), _unit(bass)
+    previous = np.vstack([t[:1], t[:-1]])
+    following = np.vstack([t[1:], t[-1:]])
+    bars = np.cumsum(bar_position == 0) if bar_position is not None else np.arange(len(t)) // 4
+    bar_mean = np.zeros_like(t)
+    for k in np.unique(bars):
+        inside = bars == k
+        bar_mean[inside] = _unit(treble[inside].sum(axis=0, keepdims=True))
+    return [t, b, previous, following, bar_mean], presence
+
+
+def learned_probabilities(model: dict, treble: np.ndarray, bass: np.ndarray, bar_position: np.ndarray | None) -> np.ndarray:
+    """(beats, 25): probability of each major chord (C..B), each minor chord, and no chord."""
+    parts, presence = beat_features(treble, bass, bar_position)
+    n = len(presence)
+    scores = np.zeros((n, 12, 3))
+    for root in range(12):
+        x = np.hstack([np.roll(p, -root, axis=1) for p in parts] + [presence[:, None]])
+        scores[:, root] = x @ model["coef"].T + model["intercept"]
+    # Per root: softmax over (not this root, major, minor).
+    e = np.exp(scores - scores.max(axis=2, keepdims=True))
+    p = e / e.sum(axis=2, keepdims=True)
+    out = np.zeros((n, 25))
+    out[:, :12] = p[:, :, 1]
+    out[:, 12:24] = p[:, :, 2]
+    out[:, 24] = np.exp(np.log(p[:, :, 0] + 1e-9).mean(axis=1)) ** 3 * np.exp(-6)
+    return out / out.sum(axis=1, keepdims=True)
+
+
+def _minorish(quality: str) -> bool:
+    """Minor family: a minor third and no major third (minor, m7, dim, m7b5...)."""
+    intervals = QUALITIES[quality].intervals
+    return 3 in intervals and 4 not in intervals
 
 
 def _slash_bass(root: int, quality: str, bass: np.ndarray) -> int | None:
