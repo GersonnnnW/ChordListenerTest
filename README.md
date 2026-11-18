@@ -91,6 +91,7 @@ docker run -p 8000:8000 -v chordlistener-data:/data chordlistener
   - *Lyrics:* type under each bar, or paste a whole verse and have it spread across bars.
   - *Title, artist, key, BPM.*
   - **Save** stores the corrected version; **Reset to original** brings back the automatic one. Undo and redo cover the last 60 changes.
+- **Versions** — people can add their own version of a song: import sheet music (MusicXML from MuseScore, Sibelius, Finale or Dorico), paste or upload a chord sheet (with bar lines, chords over lyrics, or ChordPro), or share the corrections they made in Edit. Everyone who opens the song can pick any version from the *Version* list instead of the automatic one (chords, sheet music, tabs and downloads all follow), share a link to it, and say whether it is accurate (👍 / 👎). Once a version is clearly rated more accurate than the automatic one, it is shown first. Versions are kept as files in the data folder; `python -m tools.export_versions DATA_DIR` turns the well-reviewed ones into training material.
 - **Download** — a PDF with a choice of what goes in it: the notes, chords, lyrics, key and tempo, each on or off, as a piano score, a lead sheet or a guitar tab. MusicXML, MIDI, a text chord chart, a text guitar tab and JSON are also offered.
 
 - **Guitar tip** — when the sounding chords are awkward on guitar (Bbm, Ab, Db…), the page suggests the capo position that turns them into easy shapes (capo 1: Am, G, C) and shows those chords with one click. This is usually why chords "look wrong" next to a chord sheet: sheets are written for the capo, the recording sounds a few semitones higher.
@@ -200,7 +201,7 @@ All settings are environment variables.
 | `CL_RETENTION_DAYS` | `30` | Days results are kept; `0` keeps them forever |
 | `CL_WAIT_SECONDS` | `120` | How long a request is held open before it turns into a pollable job |
 
-Uploads are written to a temporary file, analysed and deleted. Only the transcription is stored, plus, for video uploads, an MP3 of the soundtrack that is deleted after `CL_KEEP_AUDIO_MINUTES` and can only be fetched by the uploader.
+Uploads are written to a temporary file, analysed and deleted. Only the transcription is stored (and versions people share, as files under `versions/` in the data folder), plus, for video uploads, an MP3 of the soundtrack that is deleted after `CL_KEEP_AUDIO_MINUTES` and can only be fetched by the uploader.
 
 ## Accuracy: what to expect
 

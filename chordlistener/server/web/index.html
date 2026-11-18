@@ -72,6 +72,19 @@
         <button type="button" id="again" class="btn">New song</button>
       </div>
 
+      <div class="versions" id="versions" hidden>
+        <label class="version-pick">Version <select id="version-select" aria-label="Which version of the chords and sheet music to show"></select></label>
+        <span class="review" role="group" aria-label="Is this version accurate?">
+          <span class="hint">Accurate?</span>
+          <button type="button" id="vote-up" class="vote" aria-pressed="false" title="Yes, this version is accurate">👍 <span id="votes-up">0</span></button>
+          <button type="button" id="vote-down" class="vote" aria-pressed="false" title="No, this version has mistakes">👎 <span id="votes-down">0</span></button>
+        </span>
+        <span class="spacer"></span>
+        <button type="button" id="version-link" class="btn small" title="Copy a link to this version">Copy link</button>
+        <button type="button" id="version-add" class="btn small">Add your version…</button>
+      </div>
+      <p id="version-note" class="note" hidden></p>
+
       <p id="clip-note" class="note" hidden>This is the 30-second preview of the song. To transcribe all of it, upload the full audio file.</p>
 
       <dl class="facts">
@@ -149,6 +162,7 @@
           <button type="button" id="undo" class="btn small" disabled>Undo</button>
           <button type="button" id="redo" class="btn small" disabled>Redo</button>
           <button type="button" id="revert" class="btn small">Reset to original</button>
+          <button type="button" id="share-version" class="btn small" title="Let everyone choose your corrected version of this song">Share as a version…</button>
           <button type="button" id="save" class="btn small primary" disabled>Save</button>
           <button type="button" id="done" class="btn small">Done</button>
         </div>
@@ -235,6 +249,33 @@
         <a id="dl-mp3" href="#" hidden>MP3 of your video</a><span id="dl-mp3-dot" hidden> ·</span>
         <a id="dl-json" href="#" target="_blank" rel="noopener">JSON</a>
       </p>
+    </form>
+  </dialog>
+
+  <dialog id="version-dialog" class="dialog">
+    <form method="dialog">
+      <h3 id="vd-title">Add your version</h3>
+      <p class="hint" id="vd-intro">Share your own sheet music or chords for this song. Everyone who opens the song can choose it instead of the automatic version, and say whether it is accurate.</p>
+      <div id="vd-import">
+        <label class="block">Sheet music or chord file <input id="vd-file" type="file" accept=".musicxml,.xml,.mxl,.txt,.cho,.chopro,.pro,.json"></label>
+        <p class="hint">MusicXML from MuseScore, Sibelius, Finale or Dorico (.musicxml, .xml, .mxl), a chord sheet (.txt, ChordPro) or a ChordListener file (.json).</p>
+        <label class="block">…or paste chords
+          <textarea id="vd-text" rows="7" placeholder="| C | G | Am | F |&#10;&#10;or chords over the words:&#10;C              G&#10;When I find myself"></textarea>
+        </label>
+        <p class="hint">With bar lines (| C | G |) each bar is one bar of the song. Without them, the chords are lined up with what ChordListener hears; check them afterwards.</p>
+        <div class="dialog-fields">
+          <label>Bar 1 of your version is bar <input id="vd-start" type="number" min="1" value="1"> of the song</label>
+        </div>
+      </div>
+      <div class="dialog-fields">
+        <label>Your name <input id="vd-author" type="text" maxlength="60" placeholder="Shown with the version"></label>
+        <label class="grow">Note <input id="vd-note" type="text" maxlength="300" placeholder="e.g. from the official songbook"></label>
+      </div>
+      <p class="error" id="vd-error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="vd-submit" class="btn primary">Share version</button>
+        <button type="submit" class="btn">Cancel</button>
+      </div>
     </form>
   </dialog>
 

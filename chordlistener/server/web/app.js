@@ -27,6 +27,9 @@ const state = {
   tempo: "auto",
   accuracy: "standard", // which note detector to use: standard, or a specialist (piano, guitar)
   specialists: [], // the high-accuracy instruments this server offers
+  versionId: "auto", // which version of the song is shown: "auto" (ChordListener's) or one people shared
+  versions: [], // the song's versions, best reviewed first
+  firstVersion: params.get("v"), // a shared link can point at a version
   capo: false, // showing the chords a guitarist would play (capo or dropped tuning)
   lyrics: null, // what the lyrics lookup found for this song
   links: {},
@@ -454,9 +457,184 @@ async function present(body, audioUrl) {
   draw();
   show("result");
   loadLyrics();
-  history.replaceState(null, "", `?${params.has("embed") ? "embed=1&" : ""}t=${encodeURIComponent(body.id)}`);
+  state.versionId = "auto";
+  setAddress();
   window.scrollTo({ top: 0 });
+  await startVersions();
 }
+
+function setAddress() {
+  const version = state.versionId !== "auto" ? `&v=${encodeURIComponent(state.versionId)}` : "";
+  history.replaceState(null, "", `?${params.has("embed") ? "embed=1&" : ""}t=${encodeURIComponent(state.id)}${version}`);
+}
+
+// ---------------------------------------------------------------- versions people share
+
+const HOW = { automatic: "automatic", musicxml: "sheet music", chords: "chords", json: "file", edited: "corrected" };
+
+function versionLabel(v) {
+  const who = v.id === "auto" ? "ChordListener (automatic)" : `${v.author} (${HOW[v.how] || v.how})`;
+  const votes = v.votes_up || v.votes_down ? `  👍 ${v.votes_up}  👎 ${v.votes_down}` : "";
+  return who + votes;
+}
+
+function drawVersions() {
+  const select = $("version-select");
+  select.replaceChildren(...state.versions.map((v) => {
+    const option = el("option", "", versionLabel(v));
+    option.value = v.id;
+    return option;
+  }));
+  select.value = state.versionId;
+  const current = state.versions.find((v) => v.id === state.versionId) || { votes_up: 0, votes_down: 0, my_vote: 0 };
+  $("votes-up").textContent = current.votes_up;
+  $("votes-down").textContent = current.votes_down;
+  $("vote-up").setAttribute("aria-pressed", String(current.my_vote > 0));
+  $("vote-down").setAttribute("aria-pressed", String(current.my_vote < 0));
+  $("versions").hidden = false;
+}
+
+async function loadVersions() {
+  const listing = await api(`/v1/transcriptions/${state.id}/versions`);
+  state.versions = listing.versions;
+  drawVersions();
+  return listing;
+}
+
+/** After a song opens: show the version a link asked for, or the one listeners rated most accurate. */
+async function startVersions() {
+  $("version-note").hidden = true;
+  let listing;
+  try {
+    listing = await loadVersions();
+  } catch {
+    $("versions").hidden = true;
+    return;
+  }
+  const asked = state.firstVersion;
+  state.firstVersion = null;
+  const choice = asked || listing.recommended;
+  if (!choice || choice === "auto" || !state.versions.some((v) => v.id === choice)) return;
+  await showVersion(choice);
+  if (!asked) {
+    const v = state.versions.find((x) => x.id === choice);
+    $("version-note").textContent = `Showing ${v.author}'s version: listeners rated it the most accurate. ChordListener's own version is in the Version list.`;
+    $("version-note").hidden = false;
+  }
+}
+
+async function showVersion(id) {
+  if (id === "auto") {
+    await loadScore();
+  } else {
+    const out = await api(`/v1/transcriptions/${state.id}/versions/${encodeURIComponent(id)}`);
+    state.doc = out.document;
+    state.view = out.view;
+    state.canSave = false; // a shared version is improved by sharing a new one
+    state.edited = false;
+    state.baseline = JSON.stringify(state.doc);
+  }
+  state.versionId = id;
+  state.undo = [];
+  state.redo = [];
+  state.sel = null;
+  state.sheetStale = true;
+  drawVersions();
+  setAddress();
+  await refresh();
+}
+
+$("version-select").addEventListener("change", async () => {
+  const id = $("version-select").value;
+  if (isDirty() && !confirm("Switch versions? Your unsaved changes will be lost.")) {
+    $("version-select").value = state.versionId;
+    return;
+  }
+  $("version-note").hidden = true;
+  try {
+    await showVersion(id);
+  } catch (error) {
+    alert(error.message);
+    $("version-select").value = state.versionId;
+  }
+});
+
+async function vote(direction) {
+  const current = state.versions.find((v) => v.id === state.versionId);
+  const value = current && current.my_vote === (direction === "up" ? 1 : -1) ? "none" : direction; // a second click takes it back
+  const form = new FormData();
+  form.append("vote", value);
+  try {
+    const listing = await send(`/v1/transcriptions/${state.id}/versions/${encodeURIComponent(state.versionId)}/review`, form, () => {});
+    state.versions = listing.versions;
+    drawVersions();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+$("vote-up").addEventListener("click", () => vote("up"));
+$("vote-down").addEventListener("click", () => vote("down"));
+
+$("version-link").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(location.href);
+    $("version-link").textContent = "Link copied";
+  } catch {
+    prompt("Copy this link:", location.href);
+  }
+  setTimeout(() => { $("version-link").textContent = "Copy link"; }, 2000);
+});
+
+function openVersionDialog(sharing) {
+  $("vd-title").textContent = sharing ? "Share your corrected version" : "Add your version";
+  $("vd-intro").textContent = sharing
+    ? "Everyone who opens this song will be able to choose your corrected version instead of the automatic one, and say whether it is accurate."
+    : "Share your own sheet music or chords for this song. Everyone who opens the song can choose it instead of the automatic version, and say whether it is accurate.";
+  $("vd-import").hidden = sharing;
+  $("vd-file").value = "";
+  $("vd-text").value = "";
+  $("vd-error").hidden = true;
+  $("vd-author").value = store("cl-author") || "";
+  $("version-dialog").dataset.sharing = sharing ? "1" : "";
+  $("version-dialog").showModal();
+}
+$("version-add").addEventListener("click", () => openVersionDialog(false));
+$("share-version").addEventListener("click", () => openVersionDialog(true));
+
+$("vd-submit").addEventListener("click", async () => {
+  const sharing = Boolean($("version-dialog").dataset.sharing);
+  const form = new FormData();
+  form.append("author", $("vd-author").value.trim());
+  form.append("note", $("vd-note").value.trim());
+  store("cl-author", $("vd-author").value.trim());
+  if (sharing) {
+    form.append("document", JSON.stringify(state.doc));
+  } else {
+    const file = $("vd-file").files[0];
+    if (!file && !$("vd-text").value.trim()) {
+      $("vd-error").textContent = "Choose a file or paste the chords.";
+      $("vd-error").hidden = false;
+      return;
+    }
+    if (file) form.append("file", file);
+    else form.append("text", $("vd-text").value);
+    form.append("start_bar", String(Math.max(1, parseInt($("vd-start").value, 10) || 1)));
+  }
+  $("vd-submit").disabled = true;
+  try {
+    const out = await send(`/v1/transcriptions/${state.id}/versions`, form, () => {});
+    $("version-dialog").close();
+    state.versions = out.versions.versions;
+    if (sharing) state.baseline = JSON.stringify(state.doc); // shared, so nothing is left unsaved
+    $("version-note").hidden = true;
+    await showVersion(out.version.id);
+  } catch (error) {
+    $("vd-error").textContent = error.message;
+    $("vd-error").hidden = false;
+  } finally {
+    $("vd-submit").disabled = false;
+  }
+});
 
 async function loadScore(original) {
   const score = await api(`/v1/transcriptions/${state.id}/score${original ? "?original=true" : ""}`, { headers: tokenHeader() });
@@ -931,7 +1109,10 @@ function drawEditBar() {
   const dirty = isDirty();
   const status = $("edit-status");
   status.classList.toggle("warn", dirty && state.canSave);
-  if (!state.canSave) status.textContent = "You can make changes and download them. Only the person who created this transcription can save them here.";
+  if (state.versionId !== "auto") {
+    const v = state.versions.find((x) => x.id === state.versionId);
+    status.textContent = `This is ${v ? v.author : "someone"}'s version. Share your corrections as a new version so others can use them.`;
+  } else if (!state.canSave) status.textContent = "You can make changes and download them, or share them as a version. Only the person who created this transcription can save them here.";
   else if (dirty) status.textContent = "Unsaved changes";
   else status.textContent = state.edited ? "All changes saved" : "";
   $("undo").disabled = !state.undo.length;
@@ -965,8 +1146,13 @@ async function save() {
 $("save").addEventListener("click", save);
 
 $("revert").addEventListener("click", async () => {
-  if (!confirm("Throw away all corrections and go back to the automatic transcription?")) return;
+  const question = state.versionId !== "auto" ? "Throw away your changes and go back to this version as it was shared?" : "Throw away all corrections and go back to the automatic transcription?";
+  if (!confirm(question)) return;
   try {
+    if (state.versionId !== "auto") {
+      await showVersion(state.versionId); // back to the version as it was shared
+      return;
+    }
     if (state.canSave && state.edited) await api(`/v1/transcriptions/${state.id}/score`, { method: "DELETE", headers: tokenHeader() });
     await loadScore(!state.canSave);
     state.undo = [];

@@ -232,6 +232,21 @@ and returns the validated `document`, its `view`, and the `musicxml` and/or `cha
 
 Request anything with `transpose=-1&capo=1` to get those chords, with "Capo 1" printed in the heading of the sheet music and chord chart. `tune_down: 1` (with `transpose: 1`) means the shapes are easy on a guitar tuned a half step down.
 
+## Versions: people's own sheet music and chords
+
+Every song can have versions shared by people, next to ChordListener's automatic one. A version belongs to the *song* (the same audio, identified by its hash), so everyone who opens the song sees the same versions, and each can be reviewed. Use them to show the most accurate chords and sheet music, and to collect confirmed chords for training.
+
+| Endpoint | |
+|---|---|
+| `GET /v1/transcriptions/{id}/versions` | `{"song", "versions": [...], "recommended"}`. The automatic version has id `auto`; shared ones are listed best reviewed first. Each has `author`, `how` (`musicxml`, `chords`, `json`, `edited`), `note`, `votes_up`, `votes_down`, `score` (0–1, how sure the reviews make us that it is accurate) and `my_vote`. `recommended` is a shared version once at least 3 people found it accurate and it scores at least 0.5 and better than the automatic one; otherwise `auto`. |
+| `GET /v1/transcriptions/{id}/versions/{vid}` | `{"version", "document", "view"}`: the version's score document, ready for `POST /v1/score/render` (sheet music, tabs, PDF) like any other. `transpose` as elsewhere. |
+| `POST /v1/transcriptions/{id}/versions` | Share a version (`multipart/form-data`): `author`, `note`, and one of `file` (MusicXML `.musicxml`/`.xml`/`.mxl`, a chord sheet `.txt`/ChordPro, or a score document `.json`), `text` (a chord sheet) or `document` (a score document as JSON, e.g. corrections made in the editor). `start_bar` (default 1) says which bar of the recording bar 1 of an imported file lands on. Returns the new version, its document and the updated list. |
+| `POST /v1/transcriptions/{id}/versions/{vid}/review` | `vote` = `up` (accurate), `down` (has mistakes) or `none` (take the vote back). One vote per API key, or per address without one. |
+
+**How imports are lined up with the recording.** MusicXML: bar 1 goes on bar `start_bar` of the recording and each quarter note on the next beat (a short first bar is treated as a pickup); notes, chord symbols, lyrics, key and tempo are kept; 3/4 and 4/4 only. Chord sheets with bar lines (`| C | G | Am F |`, `%` repeats a bar): one written bar per bar of the recording. Chord sheets without bar lines (chords over lyrics, ChordPro `[C]words`, or a plain list): the chords, in order, are lined up with what ChordListener heard, each starting where the recording most likely changes to it; worth checking afterwards. A chord sheet replaces the chords (and lyrics, if it has them) and keeps ChordListener's notes.
+
+Versions are stored as files under `CL_DATA_DIR/versions/<song>/` (one JSON file per version, and `auto.json` for the votes on the automatic version). `python -m tools.export_versions DATA_DIR` exports the well-reviewed ones, with their chords in seconds, for training and testing.
+
 ## Lyrics
 
 | Endpoint | |

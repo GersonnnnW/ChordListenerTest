@@ -466,3 +466,49 @@ def test_guitar_tab(client, wav_path):
     out = client.post("/v1/score/render", json={"document": doc, "arrangement": "guitar_melody", "tab": True}).json()
     assert "e|" in out["tab"] and "<sign>TAB</sign>" in out["musicxml"]
     assert client.get(f"/v1/transcriptions/{tid}/tab", params={"source": "bass"}).status_code == 422
+
+
+def test_versions_can_be_shared_chosen_and_reviewed(tmp_path, wav_path):
+    with make_client(tmp_path, wav_path) as c:
+        tid = upload(c, wav_path).json()["id"]
+        listing = c.get(f"/v1/transcriptions/{tid}/versions").json()
+        assert [v["id"] for v in listing["versions"]] == ["auto"] and listing["recommended"] == "auto"
+
+        # A chord sheet with bar lines, from bar 1.
+        made = c.post(f"/v1/transcriptions/{tid}/versions", data={"author": "Ann", "text": "| C | G | Am | F |"})
+        assert made.status_code == 200
+        version = made.json()["version"]
+        assert version["author"] == "Ann" and version["how"] == "chords"
+        assert [ch[1] for ch in made.json()["document"]["chords"][:4]] == ["C", "G", "Am", "F"]
+
+        # MusicXML: our own export comes back with the same chords.
+        xml = c.get(f"/v1/transcriptions/{tid}/musicxml").text
+        imported = c.post(f"/v1/transcriptions/{tid}/versions", data={"author": "Bob"}, files={"file": ("song.musicxml", xml.encode(), "application/xml")}).json()
+        assert imported["version"]["how"] == "musicxml" and imported["document"]["chords"][:4] == made.json()["document"]["chords"][:4]
+
+        # Everyone opening the same song sees the versions; each can be fetched by its id.
+        tid2 = upload(c, wav_path).json()["id"]
+        ids = [v["id"] for v in c.get(f"/v1/transcriptions/{tid2}/versions").json()["versions"]]
+        assert ids[0] == "auto" and version["id"] in ids and len(ids) == 3
+        got = c.get(f"/v1/transcriptions/{tid2}/versions/{version['id']}").json()
+        assert got["view"]["chords"][0]["chord"] == "C"
+        assert c.get(f"/v1/transcriptions/{tid2}/versions/auto").json()["version"]["author"] == "ChordListener"
+        assert c.get(f"/v1/transcriptions/{tid2}/versions/v_nope").status_code == 404
+
+        # Reviews: one vote per person, changeable.
+        after = c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/review", data={"vote": "up"}).json()
+        mine = next(v for v in after["versions"] if v["id"] == version["id"])
+        assert mine["votes_up"] == 1 and mine["my_vote"] == 1
+        after = c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/review", data={"vote": "up"}).json()
+        assert next(v for v in after["versions"] if v["id"] == version["id"])["votes_up"] == 1
+        after = c.post(f"/v1/transcriptions/{tid}/versions/auto/review", data={"vote": "down"}).json()
+        assert after["versions"][0]["votes_down"] == 1
+        assert c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/review", data={"vote": "maybe"}).status_code == 422
+
+        # Corrections from the editor can be shared too; nonsense is refused.
+        doc = got["document"]
+        doc["chords"][0][1] = "Cmaj7"
+        shared = c.post(f"/v1/transcriptions/{tid}/versions", data={"author": "Cy", "document": __import__("json").dumps(doc)}).json()
+        assert shared["version"]["how"] == "edited" and shared["document"]["chords"][0][1] == "Cmaj7"
+        assert c.post(f"/v1/transcriptions/{tid}/versions", data={"text": "hello there"}).status_code == 400
+        assert c.post(f"/v1/transcriptions/{tid}/versions", data={}).status_code == 400
