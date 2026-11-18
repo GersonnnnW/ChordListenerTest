@@ -40,7 +40,7 @@ from ..theory import VOCABULARIES
 from .catalog import CatalogError, CatalogProvider, Track, make_provider
 from .config import Settings
 from .lyricsdb import LyricsProvider, make_lyrics_provider
-from .versions import AUTO, VersionError, VersionStore, rating, tally
+from .versions import AUTO, VersionError, VersionStore, song_key, stars_summary
 from .. import imports
 from .store import Store, hash_key
 
@@ -632,32 +632,35 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         store.delete_score(row["id"])
         return Response(status_code=204)
 
-    # ---- Versions: people's own sheet music and chords, shared and reviewed ----
+    # ---- Versions: people's own sheet music and chords, shared and rated ----
 
-    def song_of(row) -> str:
+    def song_of(row) -> tuple[str, bool, str, dict]:
+        """(song key, whether matched by name, this recording's audio hash, the song's current document)."""
         if row["status"] != "completed" or not row["content_hash"]:
             raise HTTPException(409, "The transcription is not finished yet")
-        return row["content_hash"]
+        doc = current_document(row)[0]  # its title and artist, as corrected if they were
+        key, by_name = song_key(doc.get("title", ""), doc.get("artist", ""), row["content_hash"])
+        return key, by_name, row["content_hash"], doc
 
     def voter(who: Caller) -> str:
         return ("key:" + who.owner) if not who.is_public else ("ip:" + who.ip)
 
-    def auto_summary(song: str) -> dict:
-        up, down = tally(versions.auto(song).get("votes", {}))
-        return {"id": AUTO, "author": "ChordListener", "how": "automatic", "note": "", "created_at": 0, "votes_up": up, "votes_down": down, "score": rating(up, down)}
-
     def listing(row, who: Caller) -> dict:
-        song = song_of(row)
+        song, by_name, recording, doc = song_of(row)
+        auto = versions.auto(song, recording)
         records = versions.list(song)
-        mine = {r["id"]: versions.voted(r, voter(who)) for r in records}
-        mine[AUTO] = versions.voted(versions.auto(song), voter(who))
-        items = [auto_summary(song)] + sorted((versions.summary(r) for r in records), key=lambda v: (-v["score"], -v["votes_up"], -v["created_at"]))
-        for item in items:
-            item["my_vote"] = mine.get(item["id"], 0)
-        # Suggest a shared version once enough people found it accurate, and more so than the automatic one.
-        best = max(items[1:], key=lambda v: v["score"], default=None)
-        recommended = best["id"] if best and best["votes_up"] >= 3 and best["score"] >= 0.5 and best["score"] > items[0]["score"] else AUTO
-        return {"song": song, "versions": items, "recommended": recommended}
+        items = [{"id": AUTO, "author": "ChordListener", "how": "automatic", "note": "", "created_at": 0, **stars_summary(auto.get("ratings", {})), "my_stars": versions.mine(auto, voter(who))}]
+        shared = []
+        for record in records:
+            item = versions.summary(record)
+            item["my_stars"] = versions.mine(record, voter(who))
+            item["this_recording"] = record.get("recording") == recording
+            shared.append(item)
+        items += sorted(shared, key=lambda v: (-v["score"], -v["ratings"], -v["created_at"]))
+        # Suggest a shared version once enough people rate it well, and better than the automatic one.
+        best = items[1] if len(items) > 1 else None
+        recommended = best["id"] if best and best["ratings"] >= 3 and best["stars"] >= 3.5 and best["score"] > items[0]["score"] else AUTO
+        return {"song": song, "by_name": by_name, "title": doc.get("title", ""), "artist": doc.get("artist", ""), "versions": items, "recommended": recommended}
 
     def charge_versions(who: Caller, what: str, per_hour: int) -> None:
         ok, retry = limiter.allow(f"{what}:" + voter(who), per_hour, 3600)
@@ -666,22 +669,27 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
 
     @app.get("/v1/transcriptions/{tid}/versions", tags=["Versions"], summary="All versions of this song: the automatic one and those people shared")
     async def list_versions(tid: str, who: Caller = Depends(caller)):
-        """Versions belong to the song (the same audio), so everyone who opens it sees the same list, best reviewed first."""
+        """Versions belong to the song by name (artist and title), so everyone who opens any recording of it sees the same list, best rated first."""
         return listing(owned(tid, who), who)
 
-    @app.get("/v1/transcriptions/{tid}/versions/{vid}", tags=["Versions"], summary="One version's score document")
+    @app.get("/v1/transcriptions/{tid}/versions/{vid}", tags=["Versions"], summary="One version's score document, on this recording's beats")
     async def get_version(tid: str, vid: str, who: Caller = Depends(caller), transpose: int = Query(0, ge=-11, le=11)):
+        """A version made on another recording of the song is moved by whole bars and transposed to fit this one (see `fitted`)."""
         row = owned(tid, who)
-        song = song_of(row)
+        song, _, recording, _ = song_of(row)
+        fitted = None
         try:
             if vid == AUTO:
-                doc, summary = current_document(row, original=True)[0], auto_summary(song)
+                doc = current_document(row, original=True)[0]
+                summary = {"id": AUTO, "author": "ChordListener", "how": "automatic", **stars_summary(versions.auto(song, recording).get("ratings", {}))}
             else:
                 record = versions.get(song, vid)
                 doc, summary = normalize_document(record["document"]), versions.summary(record)
+                if record.get("recording") != recording:
+                    doc, fitted = imports.fit(doc, current_document(row, original=True)[0])
         except (VersionError, DocumentError) as exc:
             raise HTTPException(404, str(exc)) from exc
-        return {"version": summary, "document": doc, "view": document_view(doc, transpose)}
+        return {"version": summary, "document": doc, "view": document_view(doc, transpose), "fitted": fitted}
 
     @app.post("/v1/transcriptions/{tid}/versions", tags=["Versions"], summary="Share a version: import sheet music or chords, or publish corrections")
     async def add_version(
@@ -694,9 +702,9 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         document: str = Form("", max_length=4_000_000, description="A ChordListener score document (JSON), e.g. corrections made in the editor"),
         file: UploadFile | None = File(None, description="MusicXML (.musicxml, .xml, .mxl), a chord sheet (.txt, .cho, .pro) or a score document (.json)"),
     ):
-        """Becomes a version of this song that everyone can choose instead of the automatic one, and review."""
+        """Becomes a version of this song that everyone can choose instead of the automatic one, and rate."""
         row = owned(tid, who)
-        song = song_of(row)
+        song, _, recording, current = song_of(row)
         charge_versions(who, "versions", 30)
         base = current_document(row, original=True)[0]
         try:
@@ -715,18 +723,17 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
             raise HTTPException(400, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, "The score document is not valid JSON") from exc
-        meta = json.loads(row["meta"])
-        record = versions.add(song, doc, author, how, note, meta.get("title", ""), meta.get("artist", ""))
+        record = versions.add(song, recording, doc, author, how, note, current.get("title", ""), current.get("artist", ""))
         return {"version": versions.summary(record), "document": doc, "view": document_view(doc), "versions": listing(row, who)}
 
-    @app.post("/v1/transcriptions/{tid}/versions/{vid}/review", tags=["Versions"], summary="Say whether a version is accurate")
-    async def review_version(tid: str, vid: str, who: Caller = Depends(caller), vote: str = Form(..., pattern="^(up|down|none)$")):
-        """One vote per person (API key, or address without one); voting again replaces it. "auto" is ChordListener's own version."""
+    @app.post("/v1/transcriptions/{tid}/versions/{vid}/rating", tags=["Versions"], summary="Rate how accurate a version is")
+    async def rate_version(tid: str, vid: str, who: Caller = Depends(caller), stars: int = Form(..., ge=0, le=5, description="1 (many mistakes) to 5 (spot on); 0 takes your rating back")):
+        """One rating per person (API key, or address without one); rating again replaces it. "auto" is ChordListener's own version of this recording."""
         row = owned(tid, who)
-        song = song_of(row)
+        song, _, recording, _ = song_of(row)
         charge_versions(who, "reviews", 300)
         try:
-            versions.vote(song, vid, voter(who), {"up": 1, "down": -1, "none": 0}[vote])
+            versions.rate(song, vid, voter(who), stars, recording)
         except VersionError as exc:
             raise HTTPException(404, str(exc)) from exc
         return listing(row, who)

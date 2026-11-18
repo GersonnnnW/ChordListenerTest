@@ -474,8 +474,7 @@ const HOW = { automatic: "automatic", musicxml: "sheet music", chords: "chords",
 
 function versionLabel(v) {
   const who = v.id === "auto" ? "ChordListener (automatic)" : `${v.author} (${HOW[v.how] || v.how})`;
-  const votes = v.votes_up || v.votes_down ? `  👍 ${v.votes_up}  👎 ${v.votes_down}` : "";
-  return who + votes;
+  return v.ratings ? `${who}  ★ ${v.stars.toFixed(1)} (${v.ratings})` : who;
 }
 
 function drawVersions() {
@@ -486,17 +485,24 @@ function drawVersions() {
     return option;
   }));
   select.value = state.versionId;
-  const current = state.versions.find((v) => v.id === state.versionId) || { votes_up: 0, votes_down: 0, my_vote: 0 };
-  $("votes-up").textContent = current.votes_up;
-  $("votes-down").textContent = current.votes_down;
-  $("vote-up").setAttribute("aria-pressed", String(current.my_vote > 0));
-  $("vote-down").setAttribute("aria-pressed", String(current.my_vote < 0));
+  const current = state.versions.find((v) => v.id === state.versionId) || { ratings: 0, stars: 0, my_stars: 0 };
+  // Lit stars: your own rating if you gave one, otherwise everyone's average.
+  const shown = current.my_stars || Math.round(current.stars);
+  for (const star of document.querySelectorAll("#stars button")) {
+    star.classList.toggle("on", Number(star.dataset.stars) <= shown);
+    star.setAttribute("aria-pressed", String(Number(star.dataset.stars) === current.my_stars));
+  }
+  $("stars").classList.toggle("mine", Boolean(current.my_stars));
+  $("stars-summary").textContent = current.ratings
+    ? `${current.stars.toFixed(1)} from ${current.ratings} ${current.ratings === 1 ? "rating" : "ratings"}${current.my_stars ? ` · yours: ${current.my_stars}` : ""}`
+    : "not rated yet";
   $("versions").hidden = false;
 }
 
 async function loadVersions() {
   const listing = await api(`/v1/transcriptions/${state.id}/versions`);
   state.versions = listing.versions;
+  $("versions-scope").hidden = listing.by_name;
   drawVersions();
   return listing;
 }
@@ -518,7 +524,8 @@ async function startVersions() {
   await showVersion(choice);
   if (!asked) {
     const v = state.versions.find((x) => x.id === choice);
-    $("version-note").textContent = `Showing ${v.author}'s version: listeners rated it the most accurate. ChordListener's own version is in the Version list.`;
+    const fitted = $("version-note").hidden ? "" : ` ${$("version-note").textContent}`;
+    $("version-note").textContent = `Showing ${v.author}'s version: listeners rated it the most accurate. ChordListener's own version is in the Version list.${fitted}`;
     $("version-note").hidden = false;
   }
 }
@@ -528,6 +535,15 @@ async function showVersion(id) {
     await loadScore();
   } else {
     const out = await api(`/v1/transcriptions/${state.id}/versions/${encodeURIComponent(id)}`);
+    const fit = out.fitted;
+    if (fit && fit.match !== null) {
+      // Made on another recording of the song: say how it was lined up with this one.
+      const moves = [];
+      if (fit.shift_bars) moves.push(`${Math.abs(fit.shift_bars)} bar${Math.abs(fit.shift_bars) === 1 ? "" : "s"} ${fit.shift_bars > 0 ? "later" : "earlier"}`);
+      if (fit.transpose) moves.push(`${Math.abs(fit.transpose)} semitone${Math.abs(fit.transpose) === 1 ? "" : "s"} ${fit.transpose > 0 ? "higher" : "lower"}`);
+      $("version-note").textContent = `This version was made on another recording of the song, so it was lined up with this one${moves.length ? ` (${moves.join(", ")})` : ""}. Its chords agree ${Math.round(fit.match * 100)}% with what ChordListener hears here.`;
+      $("version-note").hidden = false;
+    }
     state.doc = out.document;
     state.view = out.view;
     state.canSave = false; // a shared version is improved by sharing a new one
@@ -559,21 +575,19 @@ $("version-select").addEventListener("change", async () => {
   }
 });
 
-async function vote(direction) {
+async function rate(stars) {
   const current = state.versions.find((v) => v.id === state.versionId);
-  const value = current && current.my_vote === (direction === "up" ? 1 : -1) ? "none" : direction; // a second click takes it back
   const form = new FormData();
-  form.append("vote", value);
+  form.append("stars", String(current && current.my_stars === stars ? 0 : stars)); // the same star again takes it back
   try {
-    const listing = await send(`/v1/transcriptions/${state.id}/versions/${encodeURIComponent(state.versionId)}/review`, form, () => {});
+    const listing = await send(`/v1/transcriptions/${state.id}/versions/${encodeURIComponent(state.versionId)}/rating`, form, () => {});
     state.versions = listing.versions;
     drawVersions();
   } catch (error) {
     alert(error.message);
   }
 }
-$("vote-up").addEventListener("click", () => vote("up"));
-$("vote-down").addEventListener("click", () => vote("down"));
+for (const star of document.querySelectorAll("#stars button")) star.addEventListener("click", () => rate(Number(star.dataset.stars)));
 
 $("version-link").addEventListener("click", async () => {
   try {

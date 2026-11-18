@@ -74,16 +74,19 @@
 
       <div class="versions" id="versions" hidden>
         <label class="version-pick">Version <select id="version-select" aria-label="Which version of the chords and sheet music to show"></select></label>
-        <span class="review" role="group" aria-label="Is this version accurate?">
-          <span class="hint">Accurate?</span>
-          <button type="button" id="vote-up" class="vote" aria-pressed="false" title="Yes, this version is accurate">👍 <span id="votes-up">0</span></button>
-          <button type="button" id="vote-down" class="vote" aria-pressed="false" title="No, this version has mistakes">👎 <span id="votes-down">0</span></button>
+        <span class="review" role="group" aria-label="How accurate is this version?">
+          <span class="hint">How accurate?</span>
+          <span class="stars" id="stars">
+            <button type="button" data-stars="1" title="1 star: many mistakes" aria-label="1 star">★</button><button type="button" data-stars="2" title="2 stars" aria-label="2 stars">★</button><button type="button" data-stars="3" title="3 stars" aria-label="3 stars">★</button><button type="button" data-stars="4" title="4 stars" aria-label="4 stars">★</button><button type="button" data-stars="5" title="5 stars: spot on" aria-label="5 stars">★</button>
+          </span>
+          <span class="hint" id="stars-summary"></span>
         </span>
         <span class="spacer"></span>
         <button type="button" id="version-link" class="btn small" title="Copy a link to this version">Copy link</button>
         <button type="button" id="version-add" class="btn small">Add your version…</button>
       </div>
       <p id="version-note" class="note" hidden></p>
+      <p id="versions-scope" class="hint scope" hidden>Fill in the title and artist (Edit) to share versions with everyone who opens any recording of this song.</p>
 
       <p id="clip-note" class="note" hidden>This is the 30-second preview of the song. To transcribe all of it, upload the full audio file.</p>
 

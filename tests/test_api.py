@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from chordlistener import ENGINE_VERSION
 from chordlistener.server.app import create_app
+from tools import songgen
 from chordlistener.server.catalog import CatalogProvider, Track
 from chordlistener.lyrics import Lyrics
 from chordlistener.server.config import Settings
@@ -468,17 +469,21 @@ def test_guitar_tab(client, wav_path):
     assert client.get(f"/v1/transcriptions/{tid}/tab", params={"source": "bass"}).status_code == 422
 
 
-def test_versions_can_be_shared_chosen_and_reviewed(tmp_path, wav_path):
+def test_versions_can_be_shared_chosen_and_rated(tmp_path, wav_path):
+    import json as _json
+
     with make_client(tmp_path, wav_path) as c:
-        tid = upload(c, wav_path).json()["id"]
+        named = {"title": "Our Song (Official Video)", "artist": "The Band"}
+        tid = upload(c, wav_path, data=named).json()["id"]
         listing = c.get(f"/v1/transcriptions/{tid}/versions").json()
         assert [v["id"] for v in listing["versions"]] == ["auto"] and listing["recommended"] == "auto"
+        assert listing["by_name"] is True and listing["song"] == "band--our-song"
 
         # A chord sheet with bar lines, from bar 1.
         made = c.post(f"/v1/transcriptions/{tid}/versions", data={"author": "Ann", "text": "| C | G | Am | F |"})
         assert made.status_code == 200
         version = made.json()["version"]
-        assert version["author"] == "Ann" and version["how"] == "chords"
+        assert version["author"] == "Ann" and version["how"] == "chords" and version["ratings"] == 0
         assert [ch[1] for ch in made.json()["document"]["chords"][:4]] == ["C", "G", "Am", "F"]
 
         # MusicXML: our own export comes back with the same chords.
@@ -486,29 +491,41 @@ def test_versions_can_be_shared_chosen_and_reviewed(tmp_path, wav_path):
         imported = c.post(f"/v1/transcriptions/{tid}/versions", data={"author": "Bob"}, files={"file": ("song.musicxml", xml.encode(), "application/xml")}).json()
         assert imported["version"]["how"] == "musicxml" and imported["document"]["chords"][:4] == made.json()["document"]["chords"][:4]
 
-        # Everyone opening the same song sees the versions; each can be fetched by its id.
-        tid2 = upload(c, wav_path).json()["id"]
-        ids = [v["id"] for v in c.get(f"/v1/transcriptions/{tid2}/versions").json()["versions"]]
-        assert ids[0] == "auto" and version["id"] in ids and len(ids) == 3
-        got = c.get(f"/v1/transcriptions/{tid2}/versions/{version['id']}").json()
-        assert got["view"]["chords"][0]["chord"] == "C"
-        assert c.get(f"/v1/transcriptions/{tid2}/versions/auto").json()["version"]["author"] == "ChordListener"
-        assert c.get(f"/v1/transcriptions/{tid2}/versions/v_nope").status_code == 404
-
-        # Reviews: one vote per person, changeable.
-        after = c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/review", data={"vote": "up"}).json()
+        # Ratings: one per person, changeable, 0 takes it back.
+        after = c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/rating", data={"stars": 4}).json()
         mine = next(v for v in after["versions"] if v["id"] == version["id"])
-        assert mine["votes_up"] == 1 and mine["my_vote"] == 1
-        after = c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/review", data={"vote": "up"}).json()
-        assert next(v for v in after["versions"] if v["id"] == version["id"])["votes_up"] == 1
-        after = c.post(f"/v1/transcriptions/{tid}/versions/auto/review", data={"vote": "down"}).json()
-        assert after["versions"][0]["votes_down"] == 1
-        assert c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/review", data={"vote": "maybe"}).status_code == 422
+        assert (mine["ratings"], mine["stars"], mine["my_stars"]) == (1, 4.0, 4)
+        after = c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/rating", data={"stars": 5}).json()
+        assert next(v for v in after["versions"] if v["id"] == version["id"])["stars"] == 5.0
+        after = c.post(f"/v1/transcriptions/{tid}/versions/auto/rating", data={"stars": 2}).json()
+        assert after["versions"][0]["stars"] == 2.0
+        assert c.post(f"/v1/transcriptions/{tid}/versions/{version['id']}/rating", data={"stars": 9}).status_code == 422
+        assert c.get(f"/v1/transcriptions/{tid}/versions/v_nope").status_code == 404
+
+        # Another recording of the same song (other tempo, other key, a bar of silence first) finds the versions by name,
+        # and each one is moved and transposed to fit it.
+        other = tmp_path / "other.wav"
+        song = songgen.make_song([("D", 4), ("A", 4), ("Bm", 4), ("G", 4)], bpm=120, key="D", style="piano", repeats=3, seed=3)
+        songgen.write_wav(str(other), songgen.render_numpy(song, seed=3))
+        with open(other, "rb") as fh:
+            tid2 = c.post("/v1/transcriptions", files={"file": ("other.wav", fh, "audio/wav")}, data={"title": "Our Song", "artist": "Band"}).json()["id"]
+        listing2 = c.get(f"/v1/transcriptions/{tid2}/versions").json()
+        assert listing2["song"] == "band--our-song" and version["id"] in [v["id"] for v in listing2["versions"]]
+        assert listing2["versions"][0]["ratings"] == 0  # the automatic version of this recording has its own ratings
+        got = c.get(f"/v1/transcriptions/{tid2}/versions/{version['id']}").json()
+        assert got["fitted"]["transpose"] == 2
+        assert [ch["chord"] for ch in got["view"]["chords"][:4]] == ["D", "A", "Bm", "G"]
+        assert c.get(f"/v1/transcriptions/{tid}/versions/{version['id']}").json()["fitted"] is None  # its own recording: as made
 
         # Corrections from the editor can be shared too; nonsense is refused.
         doc = got["document"]
-        doc["chords"][0][1] = "Cmaj7"
-        shared = c.post(f"/v1/transcriptions/{tid}/versions", data={"author": "Cy", "document": __import__("json").dumps(doc)}).json()
-        assert shared["version"]["how"] == "edited" and shared["document"]["chords"][0][1] == "Cmaj7"
+        doc["chords"][0][1] = "Dmaj7"
+        shared = c.post(f"/v1/transcriptions/{tid2}/versions", data={"author": "Cy", "document": _json.dumps(doc)}).json()
+        assert shared["version"]["how"] == "edited"
         assert c.post(f"/v1/transcriptions/{tid}/versions", data={"text": "hello there"}).status_code == 400
         assert c.post(f"/v1/transcriptions/{tid}/versions", data={}).status_code == 400
+
+        # Without an artist, versions stay with the exact recording.
+        tid3 = upload(c, wav_path).json()["id"]
+        assert c.get(f"/v1/transcriptions/{tid3}/versions").json()["by_name"] is False
+

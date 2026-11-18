@@ -107,8 +107,13 @@ h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.08; letter-spacing: -0.03
 .version-pick { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
 .version-pick select { font: inherit; font-weight: 500; max-width: min(360px, 62vw); border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); padding: 4px 6px; }
 .review { display: inline-flex; align-items: center; gap: 6px; }
-.vote { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
-.vote[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.stars { display: inline-flex; }
+.stars button { background: none; border: 0; padding: 0 2px; font-size: 20px; line-height: 1; color: var(--line); cursor: pointer; }
+.stars button.on { color: #e8a317; }
+.stars:hover button { color: #e8a317; }
+.stars button:hover ~ button { color: var(--line); }
+.stars.mine button.on { text-shadow: 0 0 1px #8a5a00; }
+.scope { margin: -6px 0 14px; }
 .dialog label.block { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; }
 .dialog label.block input[type=file], .dialog label.block textarea { display: block; margin-top: 6px; width: 100%; }
 #version-dialog { width: min(580px, calc(100vw - 32px)); }

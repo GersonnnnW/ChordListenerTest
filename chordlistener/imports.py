@@ -440,3 +440,84 @@ def align(base: dict, sequence: list[str], first_beat: int = 0) -> list[int]:
         starts[k] = b
         b -= 1
     return [first_beat + s for s in starts]
+
+
+# ---------------------------------------------------------------- another recording of the same song
+
+
+def fit(version: dict, base: dict, max_shift: int = 16) -> tuple[dict, dict]:
+    """Put a version made on one recording onto another recording of the same song.
+
+    Recordings differ in timing (a longer intro, a different tempo) and
+    sometimes in key, so the version is moved by whole bars and transposed by
+    the amount that makes its chords agree best with what this recording
+    sounds like; its notes, chords, lyrics and marks then sit on this
+    recording's beats. Returns (document, {"shift_bars", "transpose", "match"}),
+    where match is the share of beats whose chords agree (0-1)."""
+    per_bar = base["beats_per_bar"]
+    if version["beats_per_bar"] != per_bar:
+        return version, {"shift_bars": 0, "transpose": 0, "match": None}
+    mine = _beat_labels(version)
+    heard = _beat_labels(base)
+    n_mine, n_heard = len(mine), len(heard)
+    labelled = max(1, sum(m is not None for m in mine))
+    best = (-1.0, 0, 0, 0.0)
+    for shift in range(-max_shift, max_shift + 1):
+        for transpose in (0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, 6):
+            agree = total = 0
+            for b in range(n_mine):
+                target = b + shift * per_bar
+                if not 0 <= target < n_heard or mine[b] is None or heard[target] is None:
+                    continue
+                total += 1
+                root, minor = mine[b]
+                agree += heard[target] == ((root + transpose) % 12, minor)
+            if total >= 2 * per_bar:
+                # Chords of the version that land outside the recording count as misses, so a
+                # repeating progression is not lined up with half of it hanging off the end;
+                # remaining ties go to the smallest change.
+                score = agree / labelled - 0.002 * (abs(shift) + abs(transpose))
+                if score > best[0]:
+                    best = (score, shift, transpose, agree / total)
+    score, shift, transpose, match = best
+    if score < 0:
+        return version, {"shift_bars": 0, "transpose": 0, "match": None}
+    return _move(version, base, shift, transpose), {"shift_bars": shift, "transpose": transpose, "match": round(match, 3)}
+
+
+def _move(version: dict, base: dict, shift: int, transpose: int) -> dict:
+    from .theory import Key
+
+    per_bar = base["beats_per_bar"]
+    n_beats = len(base["beats"]) - 1
+    total = n_beats * 4
+    beats_shift, sixteenths = shift * per_bar, shift * per_bar * 4
+    key = Key(version["key"]["tonic"], version["key"]["minor"]).transposed(transpose)
+
+    def chord(symbol: str) -> str:
+        parsed = parse_chord_symbol(symbol)
+        return parsed.chord.transposed(transpose).symbol(key) if parsed and transpose else symbol
+
+    def staff(events):
+        out = []
+        for start, length, pitches in events:
+            s = start + sixteenths
+            ps = [p + transpose for p in pitches if 21 <= p + transpose <= 108]
+            if 0 <= s < total and ps:
+                out.append([s, min(length, total - s), ps])
+        return out
+
+    doc = {
+        "version": 1,
+        "title": version["title"],
+        "artist": version["artist"],
+        "key": {"tonic": key.tonic, "minor": key.minor},
+        "bpm": base["bpm"],
+        "beats_per_bar": per_bar,
+        "beats": base["beats"],
+        "chords": [[b + beats_shift, chord(c)] for b, c in version["chords"] if 0 <= b + beats_shift < n_beats],
+        "lyrics": {str(int(k) + shift): v for k, v in version["lyrics"].items() if 0 <= int(k) + shift < n_beats // per_bar},
+        "techniques": [[s + sixteenths, p + transpose, kind] for s, p, kind in version.get("techniques", []) if 0 <= s + sixteenths < total and 21 <= p + transpose <= 108],
+        "arrangements": {name: [staff(events) for events in staves] for name, staves in version["arrangements"].items()},
+    }
+    return normalize_document(doc)
