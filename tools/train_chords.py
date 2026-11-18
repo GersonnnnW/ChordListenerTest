@@ -255,6 +255,7 @@ def main() -> None:
     parser.add_argument("--cache", help="keep the per-beat profiles in this file between runs")
     parser.add_argument("--aam", type=int, default=400, help="AAM songs to stream (0 = none)")
     parser.add_argument("--aam-audio", help="keep downloaded AAM songs in this folder (about 8 MB each) for the next run")
+    parser.add_argument("--hidden", type=int, default=64, help="also try a small network with this many hidden units (0 = logistic only); the better on the tuning recordings is kept")
     args = parser.parse_args()
     have = {}
     if args.cache and os.path.exists(args.cache):
@@ -274,9 +275,8 @@ def main() -> None:
                 print(f"  {title:22} {source:12} right %.1f%% | changes found %.1f%% | changes real %.1f%%" % tuple(100 * v for v in evaluate(test, model)))
 
     report("templates only", None)
-    model = fit(train, 1.0)
 
-    def balance(c: float) -> float:
+    def balance(model: dict, c: float) -> float:
         # Right chords and clean change times count equally: too cheap a change
         # finds a few more chords but invents changes that are not there.
         # Averaged per source, so each kind of music has its say.
@@ -286,9 +286,16 @@ def main() -> None:
             scores.append((right + 2 * found * real / max(found + real, 1e-9)) / 2)
         return float(np.mean(scores))
 
-    best = max((balance(c), c) for c in (0.5, 1.0, 2.0, 3.0, 4.0, 6.0))
-    final = fit(train + valid, best[1])
-    print(f"change cost {best[1]} (chosen on the tuning recordings); trained on {len(train) + len(valid)} recordings")
+    best = None
+    for hidden in sorted({0, args.hidden}):
+        model = fit(train, 1.0, hidden)
+        for c in (0.5, 1.0, 2.0, 3.0, 4.0, 6.0):
+            score = balance(model, c)
+            print(f"  tuning: hidden {hidden:3} change cost {c}: {score:.4f}", flush=True)
+            if best is None or score > best[0]:
+                best = (score, c, hidden)
+    final = fit(train + valid, best[1], best[2])
+    print(f"change cost {best[1]}, hidden units {best[2]} (chosen on the tuning recordings); trained on {len(train) + len(valid)} recordings")
     report("learned model", final)
     with open(chords._MODEL_PATH, "w") as fh:
         json.dump({"layers": [[np.round(w, 5).tolist(), np.round(b, 5).tolist()] for w, b in final["layers"]], "change": final["change"]}, fh)
