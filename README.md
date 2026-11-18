@@ -206,7 +206,7 @@ Uploads are written to a temporary file, analysed and deleted. Only the transcri
 
 Automatic transcription is not perfect, and it is better to know where it is strong and weak.
 
-On generated test songs with known answers (`python -m tools.evaluate`, 10 songs across styles, keys and meters): chord roots 99%, exact chord 92%, key 10/10, meter 10/10, note F-score 0.87.
+**Chords on real recordings** (`python -m tools.train_chords DATASETS`, GuitarSet guitar accompaniment by players never used in training, scored every 50 ms against the labelled chords): the right chord (root and major/minor) **71%** of the time (was 65% before the recogniser learned from real recordings); 55% of real chord changes are found within a quarter of a second, and 55% of the changes it reports are real. Generated test songs are far easier (`python -m tools.evaluate`: chord roots 98%, exact chord 91%, key 10/10, meter 10/10, note F-score 0.87) and are only a regression check. Chord-change timing on real songs is the weakest point; more real songs with timed chord labels are the way to improve it.
 
 **Sheet music** (`python -m tools.evaluate_sheet --real DATA`), scored against what was actually played. "Right" is the share of written notes that were played; "written" is the share of played notes that appear on the page:
 

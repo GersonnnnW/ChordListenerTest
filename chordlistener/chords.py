@@ -288,7 +288,12 @@ def learned_probabilities(model: dict, treble: np.ndarray, bass: np.ndarray, bar
     out[:, :12] = p[:, :, 1]
     out[:, 12:24] = p[:, :, 2]
     out[:, 24] = np.exp(np.log(p[:, :, 0] + 1e-9).mean(axis=1)) ** 3 * np.exp(-6)
-    return out / out.sum(axis=1, keepdims=True)
+    out /= out.sum(axis=1, keepdims=True)
+    # The recordings it learned from have hardly any silence, so a quiet beat is
+    # "no chord" by how quiet it is, as in the template method.
+    out *= presence[:, None]
+    out[:, 24] += 1.0 - presence
+    return out
 
 
 def _minorish(quality: str) -> bool:

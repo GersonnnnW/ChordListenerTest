@@ -7,7 +7,8 @@ written out with their exact times. Every recording goes through the normal
 analysis to get per-beat pitch profiles; the model learns, for any root, how
 likely a beat is a major chord, a minor chord or neither (chordlistener/chords.py).
 
-Players 00-02 train, 03 picks how much a chord change costs, 00-03 train the
+Players 00-02 train, 03 picks how much a chord change costs (balancing right
+chords against clean change times), 00-03 train the
 final model, and 04-05 are only ever used to report the result. Writes
 chordlistener/models/chords.json.
 """
@@ -166,7 +167,13 @@ def main() -> None:
 
     print("templates only (before):", "right %.1f%% | changes found %.1f%% | changes real %.1f%%" % tuple(100 * v for v in evaluate(test, None)))
     model = fit(train, 1.0)
-    best = max((evaluate(valid, {**model, "change": c})[0], c) for c in (0.5, 1.0, 2.0, 3.0, 4.0))
+    def balance(c: float) -> float:
+        # Right chords and clean change times count equally: too cheap a change
+        # finds a few more chords but invents changes that are not there.
+        right, found, real = evaluate(valid, {**model, "change": c})
+        return (right + 2 * found * real / max(found + real, 1e-9)) / 2
+
+    best = max((balance(c), c) for c in (0.5, 1.0, 2.0, 3.0, 4.0, 6.0))
     final = fit(train + valid, best[1])
     print(f"change cost {best[1]} (chosen on player 03)")
     print("learned model (after):  ", "right %.1f%% | changes found %.1f%% | changes real %.1f%%" % tuple(100 * v for v in evaluate(test, final)))
