@@ -139,6 +139,7 @@ def collect(root: str, aam_songs: int, have: dict, cache: str | None = None) -> 
     for source in (guitarset(root), winterreise(root), aam(aam_songs)):
         for name, origin, split, truth, load in source:
             if name in have:
+                have[name]["split"] = split  # the split depends on how many songs are used this time
                 items.append(have[name])
                 continue
             item = {"name": name, "source": origin, "split": split, "truth": truth, **analyse(load())}
