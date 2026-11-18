@@ -859,7 +859,7 @@ async function drawSheet(xml) {
 
 function sheetHint() {
   if (isTabView() && state.show.notes) {
-    const tip = "Strummed bars are left to the chord symbols.";
+    const tip = "Strummed bars show the chord shape to hold.";
     return state.editing ? `The tab follows the notes: correct them in the ${state.arrangement === "guitar" ? "Piano" : "Lead sheet"} view. ${tip}` : tip;
   }
   if (!state.editing) return "";

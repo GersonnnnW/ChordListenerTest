@@ -15,7 +15,7 @@ the guitarist used (68% in solos, 75% in accompaniment); the rest are mostly
 the same notes played elsewhere on the neck, equally playable.
 
 Bars that are strummed chords (most attacks are three or more notes at once)
-are left empty in the tab: the chord symbols above say what to play there.
+show the shape of each chord instead, stacked, where it starts (chordshapes.py).
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ import os
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from . import chordshapes
+from .theory import Chord, parse_chord_symbol
 
 TUNINGS = {
     "standard": (40, 45, 50, 55, 59, 64),  # E2 A2 D3 G3 B3 E4, lowest string first
@@ -39,6 +42,7 @@ _MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "tabs.json")
 _model = None
 GAP_BUCKETS = (0.3, 0.6, 1.1)  # beats between notes: together, quick, steady, after a pause
 MAX_SHIFT = 13  # fret moves are counted up to this far
+WHERE_WEIGHT = 2.0  # how much "where on the neck" counts against "how the hand moves" (2: best on detected notes)
 
 
 @dataclass
@@ -49,6 +53,7 @@ class TabNote:
     places: tuple[tuple[int, int], ...]  # (string, fret) per pitch; string 0 = lowest
     technique: str = ""  # how this note was reached from the previous one: h p / \\
     bend: int = 0  # semitones this note is bent up (a bent-to note is folded into the note it bends from)
+    shape: bool = False  # the chord shape to hold in a strummed bar
 
 
 @dataclass
@@ -119,7 +124,7 @@ def place(groups: list[tuple[float, tuple[int, ...]]], tuning: tuple[int, ...], 
     where, move = model["where"], model["move"]
     options = [fingerings(p, tuning) for _, p in groups]
     leads = [np.array([_lead(f) for f in o]) for o in options]
-    statics = [np.array([sum(where[s, f] for s, f in places) for places in o]) for o in options]
+    statics = [WHERE_WEIGHT * np.array([sum(where[s, f] for s, f in places) for places in o]) for o in options]
     best = statics[0]
     back = []
     for i in range(1, len(groups)):
@@ -186,11 +191,12 @@ def strummed(groups: list[tuple[int, ...]]) -> bool:
     return sum(len(g) >= 3 for g in groups) * 2 >= len(groups)
 
 
-def tab_from_events(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int, bar: int, beat: int = 4, marks: dict | None = None) -> Tab:
+def tab_from_events(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int, bar: int, beat: int = 4, marks: dict | None = None, chords: list[tuple[int, Chord]] | None = None) -> Tab:
     """Tablature for note events (start, length, pitches) in sixteenths.
 
     marks: {(start, pitch): technique} for single notes reached by a hammer-on (h),
-    pull-off (p), slide (/ or \\) or bend (b) from the note before."""
+    pull-off (p), slide (/ or \\) or bend (b) from the note before.
+    chords: (start, chord) changes; strummed bars show the shape of each chord."""
     marks = marks or {}
     by_bar: list[list[tuple[int, int, tuple[int, ...]]]] = [[] for _ in range(n_bars)]
     for start, length, pitches in sorted(events):
@@ -237,7 +243,34 @@ def tab_from_events(events: list[tuple[int, int, tuple[int, ...]]], n_bars: int,
         note = TabNote(start, length, pitches, tuple(chosen), kind)
         bars[index].notes.append(note)
         previous = note
+    if chords:
+        _add_shapes(bars, by_bar, bar, tuning, chords)
     return Tab(name, bars, bar)
+
+
+def _add_shapes(bars: list[TabBar], by_bar, bar: int, tuning: tuple[int, ...], chords: list[tuple[int, Chord]]) -> None:
+    """In strummed bars, the shape of the chord at the start of the bar and at each change in it."""
+    changes = sorted(chords)
+    times = [t for t, _ in changes]
+    position = None
+    for index, row in enumerate(bars):
+        if not row.strummed:
+            continue
+        lo, hi = index * bar, (index + 1) * bar
+        cuts = sorted({lo} | {t for t in times if lo < t < hi})
+        for k, start in enumerate(cuts):
+            end = cuts[k + 1] if k + 1 < len(cuts) else hi
+            i = int(np.searchsorted(times, start, side="right")) - 1
+            if i < 0 or changes[i][1] is None:
+                continue
+            heard = {p for s, _, ps in by_bar[index] if start <= s < end for p in ps}
+            shape = chordshapes.choose(changes[i][1], tuning, heard, position)
+            if shape is None:
+                continue
+            fretted = [f for f in shape if f]
+            position = min(fretted) if fretted else 0
+            pitches, places = chordshapes.as_places(shape, tuning)
+            row.notes.append(TabNote(start, end - start, pitches, places, shape=True))
 
 
 def tab_from_document(doc: dict, transpose: int = 0, source: str = "notes") -> Tab:
@@ -266,7 +299,11 @@ def tab_from_document(doc: dict, transpose: int = 0, source: str = "notes") -> T
     for start, pitch, kind in doc.get("techniques", []):
         for octave in (0, 12):  # a melody line may be written an octave up
             marks[(start, pitch + transpose + octave)] = kind
-    return tab_from_events(events, n_bars, bar, marks=marks)
+    chords = []
+    for beat, symbol in doc["chords"]:
+        parsed = parse_chord_symbol(symbol)
+        chords.append((beat * 4, parsed.chord.transposed(transpose) if parsed else None))
+    return tab_from_events(events, n_bars, bar, marks=marks, chords=chords)
 
 
 # ---------------------------------------------------------------- plain-text tablature
@@ -275,8 +312,7 @@ def tab_from_document(doc: dict, transpose: int = 0, source: str = "notes") -> T
 def tab_text(tab: Tab, chords: list[tuple[int, str]], title: str = "", bars_per_line: int = 4, capo: int = 0) -> str:
     """Classic ASCII tab, chord symbols above, `bars_per_line` bars to a line.
 
-    chords: (position in sixteenths, symbol). Strummed bars are left as plain lines
-    under their chord symbols.
+    chords: (position in sixteenths, symbol), printed above the tab.
     """
     names = STRING_NAMES[tab.tuning]
     width = 2  # characters per sixteenth; two-digit frets fit

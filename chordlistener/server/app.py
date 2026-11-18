@@ -546,7 +546,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
     async def get_musicxml(
         tid: str,
         who: Caller = Depends(caller),
-        arrangement: str = Query("piano", pattern="^(piano|lead|guitar|guitar_melody)$", description="piano = two staves with all notes; lead = melody line with chord symbols; guitar = guitar notation with tablature of all the notes (strummed bars left to the chord symbols); guitar_melody = the same for the melody line"),
+        arrangement: str = Query("piano", pattern="^(piano|lead|guitar|guitar_melody)$", description="piano = two staves with all notes; lead = melody line with chord symbols; guitar = guitar notation with tablature of all the notes (strummed bars show chord shapes); guitar_melody = the same for the melody line"),
         transpose: int = Query(0, ge=-11, le=11),
         notes: bool = Query(True, description="false = chord sheet: rhythm slashes instead of notes"),
         chords: bool = Query(True, description="Print chord symbols"),
@@ -573,7 +573,7 @@ def create_app(settings: Settings | None = None, catalog: CatalogProvider | None
         original: bool = Query(False, description="Ignore saved corrections"),
         download: bool = False,
     ):
-        """Each note's string and fret, chosen as a guitarist would play it. Bars of strummed chords are left empty under their chord symbols."""
+        """Each note's string and fret, chosen as a guitarist would play it. Strummed bars show the chord shape to hold; hammer-ons, pull-offs and slides are marked where the recording shows them."""
         row = owned(tid, who)
         doc, _ = current_document(row, original)
         text = document_tab(doc, transpose, "guitar_melody" if source == "melody" else "guitar", show_options(True, chords, False, False, False, capo))

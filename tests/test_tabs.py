@@ -28,7 +28,7 @@ def test_a_scale_moves_the_hand_little():
         assert STANDARD[string] + fret == pitch
 
 
-def test_strummed_bars_are_left_empty():
+def test_strummed_bars_get_no_single_notes():
     bar = 16
     strum = [(i * 4, 4, (40, 47, 52, 56, 59, 64)) for i in range(4)]
     riff = [(bar + i * 2, 2, (p,)) for i, p in enumerate([57, 60, 62, 64, 62, 60, 57, 55])]
@@ -88,3 +88,26 @@ def test_techniques_in_musicxml():
     xml = to_musicxml(score_from_document(doc, "guitar"))
     assert '<hammer-on number="1" type="start">H</hammer-on>' in xml and '<slide number="1" type="start"' in xml
     assert "<bend><bend-alter>2</bend-alter></bend>" in xml
+
+
+def test_chord_shapes():
+    from chordlistener import chordshapes
+    from chordlistener.theory import Chord
+
+    shapes = chordshapes.voicings(0, "maj", None, STANDARD)
+    assert (None, 3, 2, 0, 1, 0) in shapes and (8, 10, 10, 9, 8, 8) in shapes  # open C and the barre at 8
+    for shape in shapes:
+        pitches = [STANDARD[s] + f for s, f in enumerate(shape) if f is not None]
+        assert pitches[0] % 12 == 0 and {p % 12 for p in pitches} >= {0, 4} and chordshapes.fingers(shape) <= 4
+    # What is heard decides between shapes: the open-position notes of C pick open C.
+    assert chordshapes.choose(Chord(0, "maj", None), STANDARD, {48, 52, 55, 60, 64}) == (None, 3, 2, 0, 1, 0)
+
+
+def test_strummed_bars_show_chord_shapes():
+    from chordlistener.theory import Chord
+
+    strum = [(i * 4, 4, (48, 52, 55, 60, 64)) for i in range(4)]
+    tab = tabs.tab_from_events(strum, 1, 16, chords=[(0, Chord(0, "maj", None))])
+    (shape,) = tab.bars[0].notes
+    assert tab.bars[0].strummed and shape.shape and shape.length == 16
+    assert dict(shape.places) == {1: 3, 2: 2, 3: 0, 4: 1, 5: 0}
