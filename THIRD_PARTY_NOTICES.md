@@ -21,7 +21,7 @@ The note-decoding routine in `chordlistener/pitch.py` is a re-implementation of 
 
 ### High-resolution guitar transcription model — MIT
 
-`chordlistener/models/guitar.onnx`, used by the optional high-accuracy mode for guitar, is converted from `guitar-gaps.pth` at <https://huggingface.co/xavriley/midi-transcription-models> (MIT, Xavier Riley): converted to ONNX with 16-bit weights (`tools/transcriber_export.py`). Details and licence text: `chordlistener/models/NOTICE-guitar-transcription.txt`.
+`chordlistener/models/guitar.onnx`, used by the optional high-accuracy mode for guitar, is converted from `guitar-gaps.pth` at <https://huggingface.co/xavriley/midi-transcription-models> (MIT, Xavier Riley): fine-tuned on GuitarSet players 00–02 (CC BY 4.0, see below; `tools/guitar_finetune.py`), then converted to ONNX with 16-bit weights (`tools/transcriber_export.py`). Details and licence text: `chordlistener/models/NOTICE-guitar-transcription.txt`.
 
 > Xavier Riley, Zixun Guo, Drew Edwards, Simon Dixon. "GAPS: A Large and Diverse Classical Guitar Dataset and Benchmark Transcription Model." ISMIR 2024.
 

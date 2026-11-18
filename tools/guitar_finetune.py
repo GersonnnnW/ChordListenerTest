@@ -182,6 +182,7 @@ def main() -> None:
     parser.add_argument("--eval-every", type=int, default=250)
     parser.add_argument("--patience", type=int, default=4, help="stop after this many checks without improvement")
     parser.add_argument("--device", default=None)
+    parser.add_argument("--amp", action="store_true", help="half precision (faster, but can overflow to NaN with this model)")
     parser.add_argument("--limit", type=int, default=0, help="use only this many excerpts per group (quick trial)")
     args = parser.parse_args()
 
@@ -211,7 +212,7 @@ def main() -> None:
             if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
                 m.eval()
 
-    use_amp = device.startswith("cuda")
+    use_amp = args.amp and device.startswith("cuda")
     optimiser = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     rng = random.Random(0)

@@ -11,9 +11,12 @@ the GAPS classical guitar dataset:
   X. Riley, D. Edwards, S. Dixon. "High Resolution Guitar Transcription via
   Domain Adaptation." ICASSP 2024.
 
-Changes made: converted from PyTorch to ONNX with the spectrogram front end
-moved outside the graph, and its weights stored as 16-bit floats
-(tools/transcriber_export.py).
+Changes made: fine-tuned on GuitarSet players 00-02 (steel-string acoustic
+guitar; Q. Xi, R. Bittner, J. Pauwels, X. Ye, J. P. Bello, "GuitarSet: A
+Dataset for Guitar Transcription", ISMIR 2018, https://zenodo.org/records/3371780,
+CC BY 4.0) with tools/guitar_finetune.py; then converted from PyTorch to ONNX
+with the spectrogram front end moved outside the graph, and its weights stored
+as 16-bit floats (tools/transcriber_export.py).
 
 MIT License
 

@@ -32,7 +32,7 @@ No large language model is involved, so **analysing a song costs zero AI tokens*
 **Optional high-accuracy mode, for piano or guitar** (a choice on the website, `accuracy=piano` or `accuracy=guitar` in the API, `--high-accuracy piano|guitar` on the command line). A second, much larger note detector made for that instrument (about 20 million parameters) listens to the recording as well. Beats, chords and key always come from the standard pipeline. A finished transcription can be switched afterwards with one click (or `POST /v1/transcriptions/{id}/reanalyze`).
 
 - **Piano** — ByteDance's high-resolution piano transcription model. Where the music is piano (recognised because the two detectors then agree on at least 85% of the notes) its notes are written instead. On guitar, voice and band recordings, where it misses or invents notes, the standard notes are kept, so the mode is never worse. A big gain on piano.
-- **Guitar** — Xavier Riley's guitar version of the same design (trained on classical guitar). On its own it is no better than the standard notes, but the two make different mistakes, so they are combined: a note the standard filter was unsure of is kept only if the guitar detector heard it too, and a note only the guitar detector heard is added when it is sure. A small but consistent gain (1–2 points on every guitar test set, never worse). A guitar-trained model of piano quality would need training on guitar recordings, which needs a GPU.
+- **Guitar** — Xavier Riley's guitar version of the same design (trained on classical guitar), further trained by us on steel-string guitar recordings (GuitarSet). Its notes are combined with the standard ones: a note the standard filter was unsure of is kept only if the guitar detector heard it too, and a note only the guitar detector heard is added when it is sure. On real guitar recordings: 84.7% of written notes right (standard 83%), 80% of played notes written (standard 77%).
 
 Measured on a 4-core cloud VM, no GPU:
 
@@ -213,8 +213,8 @@ On generated test songs with known answers (`python -m tools.evaluate`, 10 songs
 | Real piano recordings (never used in training) | 89% (was 78%) | 73% (was 52%) |
 | Real piano, **high-accuracy mode: piano** | **95%** | **93%** |
 | Real guitar recordings, players held out of training | 83% (was 72%) | 77% (was 56%) |
-| Real guitar, **high-accuracy mode: guitar** | 83.5% | 78% |
-| Unseen guitar parts (BabySlakh test songs), standard → **guitar mode** | 77% → **80%** | 80% → **80%** (F 0.78 → 0.80) |
+| Real guitar, **high-accuracy mode: guitar** | **84.7%** (was 83.5%) | **80%** (was 78%) |
+| Unseen guitar parts (BabySlakh test songs), standard → **guitar mode** (before the guitar model's GuitarSet training; not re-measured) | 77% → **80%** | 80% → **80%** (F 0.78 → 0.80) |
 | Generated songs | 89% (was 62%) | 78% (was 55%) |
 | Generated songs, instruments held out of training | 77% (was 69%) | 75% (was 61%) |
 

@@ -81,7 +81,7 @@ Requests made **without** an API key also get an `"edit_token"` in this response
   "source": {"type": "upload", "filename": "song.mp3", "title": "My Song", "artist": "", "audio_seconds": 213.4,
              "options": {"vocabulary": "standard", "beats_per_bar": null, "tempo": "auto", "accuracy": "standard"}},
   "result": {
-    "engine_version": "3",
+    "engine_version": "4",
     "duration": 213.4,
     "tempo_bpm": 73.0,
     "time_signature": "4/4",
@@ -295,7 +295,7 @@ Pass an instance to `create_app(settings, catalog=MyCatalog())`. Results are cac
 
 ## Health
 
-`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "3", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000, "high_accuracy": ["piano", "guitar"]}`
+`GET /v1/health` → `{"status": "ok", "version": "0.1.0", "engine_version": "4", "catalog": "itunes", "lyrics": "lrclib", "max_upload_mb": 1000, "high_accuracy": ["piano", "guitar"]}`
 
 `high_accuracy` lists the instruments this server offers high-accuracy mode for (empty when it is switched off).
 
