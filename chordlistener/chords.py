@@ -231,8 +231,9 @@ class ChordRecognizer:
 
 # ---------------------------------------------------------------- the learned model
 #
-# Trained on real guitar accompaniment with timed chord labels (GuitarSet,
-# players 00-03; tools/train_chords.py). One small logistic model, shared by
+# Trained on recordings with timed chord labels: real guitar (GuitarSet), real
+# piano and voice (Schubert Winterreise) and full-band songs (AAM), each source
+# weighted equally (tools/train_chords.py). One small logistic model, shared by
 # all twelve roots: rotate the pitch-class profiles so the candidate root is at
 # C, and it says how likely this beat is a major chord, a minor chord, or
 # neither on that root. It sees the beat, its neighbours and its whole bar, so

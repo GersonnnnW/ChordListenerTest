@@ -206,7 +206,15 @@ Uploads are written to a temporary file, analysed and deleted. Only the transcri
 
 Automatic transcription is not perfect, and it is better to know where it is strong and weak.
 
-**Chords on real recordings** (`python -m tools.train_chords DATASETS`, GuitarSet guitar accompaniment by players never used in training, scored every 50 ms against the labelled chords): the right chord (root and major/minor) **71%** of the time (was 65% before the recogniser learned from real recordings); 55% of real chord changes are found within a quarter of a second, and 55% of the changes it reports are real. Generated test songs are far easier (`python -m tools.evaluate`: chord roots 98%, exact chord 91%, key 10/10, meter 10/10, note F-score 0.87) and are only a regression check. Chord-change timing on real songs is the weakest point; more real songs with timed chord labels are the way to improve it.
+**Chords** (`python -m tools.train_chords DATASETS`; the recogniser learns from three openly licensed sources and is scored every 50 ms against the labelled chords of recordings it never trained on):
+
+| Test recordings | Right chord (root, major/minor) | Changes found (within ¼ s) | Reported changes that are real |
+|---|---|---|---|
+| Real guitar accompaniment (GuitarSet) | **70%** (was 65%) | 56% | 49% |
+| Real piano and voice (Schubert, *Winterreise*) | **67%** (was 66%) | 49% | 61% |
+| Full-band songs from real instrument samples (AAM) | **91%** (was 89%) | 77% | 78% |
+
+There is no openly licensed collection of real pop or rock recordings with timed chords, so commercial songs are not in the training or the tests. Generated test songs are far easier (`python -m tools.evaluate`: chord roots 98%, exact chord 91%, key 10/10, meter 10/10, note F-score 0.87) and are only a regression check. Chord-change timing on real songs is the weakest point; more real songs with timed chord labels are the way to improve it.
 
 **Sheet music** (`python -m tools.evaluate_sheet --real DATA`), scored against what was actually played. "Right" is the share of written notes that were played; "written" is the share of played notes that appear on the page:
 

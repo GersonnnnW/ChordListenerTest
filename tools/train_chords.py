@@ -171,8 +171,14 @@ def beat_labels(item) -> list:
 
 
 def training_set(items):
-    X, y = [], []
+    X, y, w = [], [], []
+    # Each source counts the same in total, so the many beats of the generated
+    # songs do not drown out the real recordings.
+    beats = {}
     for item in items:
+        beats[item.get("source")] = beats.get(item.get("source"), 0) + len(item["starts"])
+    for item in items:
+        share = 1.0 / (len(beats) * beats[item.get("source")])
         parts, presence = chords.beat_features(item["treble"], item["bass"], item["bar_position"])
         labels = beat_labels(item)
         for root in range(12):
@@ -182,7 +188,9 @@ def training_set(items):
                     continue
                 y.append(0 if value == "N" or value[0] != root else (1 if value[1] == "maj" else 2))
                 X.append(rotated[i])
-    return np.array(X), np.array(y)
+                w.append(share)
+    w = np.array(w)
+    return np.array(X), np.array(y), w * len(w) / w.sum()
 
 
 def evaluate(items, model) -> tuple[float, float, float]:
@@ -222,8 +230,8 @@ def evaluate(items, model) -> tuple[float, float, float]:
 def fit(items, change: float) -> dict:
     from sklearn.linear_model import LogisticRegression
 
-    X, y = training_set(items)
-    clf = LogisticRegression(max_iter=3000, C=1.0).fit(X, y)
+    X, y, w = training_set(items)
+    clf = LogisticRegression(max_iter=3000, C=1.0).fit(X, y, sample_weight=w)
     return {"coef": clf.coef_, "intercept": clf.intercept_, "change": change}
 
 
@@ -254,8 +262,12 @@ def main() -> None:
     def balance(c: float) -> float:
         # Right chords and clean change times count equally: too cheap a change
         # finds a few more chords but invents changes that are not there.
-        right, found, real = evaluate(valid, {**model, "change": c})
-        return (right + 2 * found * real / max(found + real, 1e-9)) / 2
+        # Averaged per source, so each kind of music has its say.
+        scores = []
+        for source in {i["source"] for i in valid}:
+            right, found, real = evaluate([i for i in valid if i["source"] == source], {**model, "change": c})
+            scores.append((right + 2 * found * real / max(found + real, 1e-9)) / 2)
+        return float(np.mean(scores))
 
     best = max((balance(c), c) for c in (0.5, 1.0, 2.0, 3.0, 4.0, 6.0))
     final = fit(train + valid, best[1])

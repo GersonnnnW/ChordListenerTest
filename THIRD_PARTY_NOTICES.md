@@ -42,11 +42,14 @@ Copyright (c) 2015-2026 yWorks GmbH, (c) 2013-2015 Vitaly Puzrin. Licence text: 
 
 ### Training data for the note filter and melody models — CC BY 4.0
 
-`chordlistener/models/notefilter.json`, `chordlistener/models/melody.json`, `chordlistener/models/tabs.json` (guitar fingering habits, from GuitarSet) and `chordlistener/models/chords.json` (chord recogniser, from GuitarSet's timed chord labels) are original models, trained by this project on songs it generated itself and on these datasets:
+`chordlistener/models/notefilter.json`, `chordlistener/models/melody.json`, `chordlistener/models/tabs.json` (guitar fingering habits, from GuitarSet) and `chordlistener/models/chords.json` (chord recogniser, from the timed chord labels of GuitarSet, the Schubert Winterreise Dataset and AAM, below) are original models, trained by this project on songs it generated itself and on these datasets:
 
 - **GuitarSet** — Q. Xi, R. Bittner, J. Pauwels, X. Ye, J. P. Bello, "GuitarSet: A Dataset for Guitar Transcription", ISMIR 2018. <https://zenodo.org/records/3371780>, CC BY 4.0.
 - **vocadito** — R. Bittner, K. Pasalo, J. J. Bosch, G. Meseguer-Brocal, D. Rubinstein, "vocadito: A dataset of solo vocals with f0, note, and lyric annotations", 2021. <https://zenodo.org/records/5578807>, CC BY 4.0.
 - **BabySlakh** — E. Manilow, G. Wichern, P. Seetharaman, J. Le Roux, "Cutting Music Source Separation Some Slakh", WASPAA 2019. <https://zenodo.org/records/4603870>, CC BY 4.0.
+
+- **Schubert Winterreise Dataset** — C. Weiß, F. Zalkow, V. Arifi-Müller, M. Müller, H. V. Koops, A. Volk, H. G. Grohganz, "Schubert Winterreise Dataset: A Multimodal Scenario for Music Analysis", ACM Journal on Computing and Cultural Heritage, 2021. <https://zenodo.org/records/10839767>, CC BY 3.0 (performance SC06 by R. Scarlata and J. Denk, Isabella Stewart Gardner Museum).
+- **AAM: Artificial Audio Multitracks** — F. Ostermann, I. Vatolkin, M. Ebeling, "AAM: a dataset of Artificial Audio Multitracks for diverse music information retrieval tasks", EURASIP Journal on Audio, Speech, and Music Processing, 2023. <https://zenodo.org/records/5794629>, CC BY 4.0.
 
 The **Saarland Music Data (SMD)** piano recordings (CC BY-NC-SA 3.0) were used only to measure accuracy. They are not in the models or in this repository.
 
