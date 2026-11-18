@@ -276,6 +276,9 @@ def _unit(x: np.ndarray) -> np.ndarray:
     return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-9)
 
 
+SILENCE_POWER = 2.0  # quiet beats count firmly as no chord (else a reluctant-to-change model stretches the first chord into the silence before it)
+
+
 def beat_features(treble: np.ndarray, bass: np.ndarray, bar_position: np.ndarray | None) -> tuple[list[np.ndarray], np.ndarray]:
     """The profiles the model reads per beat (before rotation), and how present the music is."""
     energy = treble.sum(axis=1)
@@ -310,8 +313,9 @@ def learned_probabilities(model: dict, treble: np.ndarray, bass: np.ndarray, bar
     out /= out.sum(axis=1, keepdims=True)
     # The recordings it learned from have hardly any silence, so a quiet beat is
     # "no chord" by how quiet it is, as in the template method.
-    out *= presence[:, None]
-    out[:, 24] += 1.0 - presence
+    quiet = presence**SILENCE_POWER
+    out *= quiet[:, None]
+    out[:, 24] += 1.0 - quiet
     return out
 
 
