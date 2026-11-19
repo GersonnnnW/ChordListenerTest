@@ -386,6 +386,8 @@ function convertedAudio() {
 function releaseAudio() {
   const audio = $("audio");
   audio.pause();
+  pausePlayback();
+  clockOwn.offset = 0;
   audio.removeAttribute("src");
   audio.load();
   if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
@@ -424,8 +426,8 @@ async function present(body, audioUrl) {
   // Without the original file to hand (a shared link, or a video the browser
   // cannot play), fall back to the MP3 the server made from an uploaded video.
   const url = audioUrl || source.preview_url || convertedAudio() || "";
-  $("player").classList.toggle("silent", !url);
   if (url && $("audio").getAttribute("src") !== url) $("audio").src = url;
+  setRecording(Boolean(url));
   $("half").hidden = $("double").hidden = !state.input;
   $("half").disabled = state.tempo === "half";
   $("double").disabled = state.tempo === "double";
@@ -824,42 +826,263 @@ function renderChart() {
 }
 
 // ---------------------------------------------------------------- playback
+//
+// What is heard: the recording, a piano playing the written notes, or both.
+// The piano is synthesised in the browser and follows the recording's own
+// beats, so it stays in time with it. Without a recording (a shared link) the
+// piano keeps time itself.
 
 const audio = $("audio");
+const SOUNDS = ["recording", "piano", "both"];
+state.sound = SOUNDS.includes(store("cl-sound")) ? store("cl-sound") : "recording";
+const clockOwn = { running: false, offset: 0, startedAt: 0 }; // the piano's own clock, without a recording
+
+const hasRecording = () => !$("player").classList.contains("silent");
+const pianoHeard = () => !hasRecording() || state.sound !== "recording";
+
+function songTime() {
+  if (hasRecording()) return audio.currentTime || 0;
+  return clockOwn.running ? clockOwn.offset + (piano.ctx.currentTime - clockOwn.startedAt) : clockOwn.offset;
+}
+const isPaused = () => (hasRecording() ? audio.paused : !clockOwn.running);
 
 function setPlaying(playing) {
   $("play-icon").setAttribute("d", playing ? "M7 5h4v14H7zM13 5h4v14h-4z" : "M8 5v14l11-7z");
   $("play").setAttribute("aria-label", playing ? "Pause" : "Play");
 }
 
-$("play").addEventListener("click", () => { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); });
-audio.addEventListener("play", () => { setPlaying(true); requestAnimationFrame(tick); });
-audio.addEventListener("pause", () => setPlaying(false));
-audio.addEventListener("ended", () => setPlaying(false));
+function started() {
+  setPlaying(true);
+  piano.start();
+  requestAnimationFrame(tick);
+}
+
+function stopped() {
+  setPlaying(false);
+  piano.stop();
+}
+
+function pausePlayback() {
+  if (hasRecording()) {
+    audio.pause();
+  } else if (clockOwn.running) {
+    clockOwn.offset = songTime();
+    clockOwn.running = false;
+    stopped();
+  }
+}
+
+$("play").addEventListener("click", () => {
+  if (!isPaused()) return pausePlayback();
+  if (hasRecording()) return void audio.play().catch(() => {});
+  if (!piano.ready()) return;
+  if (clockOwn.offset >= parseFloat($("seek").max) - 0.05) clockOwn.offset = 0;
+  clockOwn.startedAt = piano.ctx.currentTime;
+  clockOwn.running = true;
+  started();
+});
+audio.addEventListener("play", started);
+audio.addEventListener("pause", stopped);
+audio.addEventListener("ended", stopped);
+audio.addEventListener("seeked", () => { if (!audio.paused) piano.start(); });
+audio.addEventListener("ratechange", () => { if (!audio.paused) piano.start(); });
 audio.addEventListener("timeupdate", () => sync());
 audio.addEventListener("error", () => {
   const current = audio.getAttribute("src");
   if (!current) return;
   const fallback = convertedAudio();
   if (fallback && current !== fallback) audio.src = fallback; // e.g. an AVI: play the converted MP3 instead
-  else $("player").classList.add("silent");
+  else setRecording(false);
 });
 $("seek").addEventListener("input", () => seekTo(parseFloat($("seek").value)));
 
 function seekTo(seconds) {
-  if (!$("player").classList.contains("silent")) audio.currentTime = Math.max(0, seconds);
-  sync(Math.max(0, seconds));
+  const to = Math.max(0, seconds);
+  if (hasRecording()) {
+    audio.currentTime = to;
+  } else {
+    clockOwn.offset = to;
+    if (clockOwn.running) {
+      clockOwn.startedAt = piano.ctx.currentTime;
+      piano.start();
+    }
+  }
+  sync(to);
 }
 
 function tick() {
   sync();
-  if (!audio.paused) requestAnimationFrame(tick);
+  if (!hasRecording() && clockOwn.running && songTime() >= parseFloat($("seek").max)) {
+    clockOwn.offset = 0;
+    clockOwn.running = false;
+    stopped();
+    sync(0);
+  }
+  if (!isPaused()) requestAnimationFrame(tick);
 }
+
+/** Whether there is a recording to play; without one the piano is the only sound. */
+function setRecording(present) {
+  if (!present) pausePlayback();
+  $("player").classList.toggle("silent", !present);
+  updateSound();
+}
+
+function updateSound() {
+  const select = $("sound");
+  const recording = hasRecording();
+  for (const option of select.options) option.disabled = !recording && option.value !== "piano";
+  select.value = recording ? state.sound : "piano";
+  audio.muted = recording && state.sound === "piano";
+  if (!isPaused()) {
+    if (pianoHeard()) piano.start();
+    else piano.stop();
+  }
+}
+
+$("sound").addEventListener("change", () => {
+  if (hasRecording()) {
+    state.sound = $("sound").value;
+    store("cl-sound", state.sound);
+  }
+  updateSound();
+});
+
+/** The notes of the sheet music being shown, in seconds on the recording's beats. */
+function pianoNotes() {
+  const doc = state.doc;
+  if (!doc || !doc.beats || doc.beats.length < 2) return [];
+  const name = state.arrangement === "lead" || state.arrangement === "guitar_melody" ? "lead" : "piano";
+  const staves = (doc.arrangements && doc.arrangements[name]) || [];
+  const beats = doc.beats;
+  const last = beats.length - 2;
+  const at = (sixteenths) => {
+    const beat = sixteenths / 4;
+    const i = Math.max(0, Math.min(last, Math.floor(beat)));
+    return beats[i] + (beat - i) * (beats[i + 1] - beats[i]);
+  };
+  const notes = [];
+  staves.forEach((events, staff) => {
+    for (const [start, length, pitches] of events || []) {
+      if (!pitches || !pitches.length) continue;
+      const time = at(start);
+      const end = at(start + length);
+      for (const pitch of pitches) {
+        notes.push({ time, length: Math.max(0.05, end - time), pitch: pitch + state.transpose, level: staff === 0 ? 0.9 : 0.7 });
+      }
+    }
+  });
+  return notes.sort((a, b) => a.time - b.time);
+}
+
+const piano = {
+  ctx: null,
+  out: null,
+  wave: null,
+  notes: [],
+  next: 0,
+  timer: 0,
+  anchor: null, // {ctx, song, rate}: the audio clock time at which the song was at `song` seconds
+  voices: new Set(),
+
+  ready() {
+    if (!this.ctx) {
+      const Context = window.AudioContext || window.webkitAudioContext;
+      if (!Context) return false;
+      this.ctx = new Context();
+      const compressor = this.ctx.createDynamicsCompressor();
+      this.out = this.ctx.createGain();
+      this.out.gain.value = 0.5;
+      this.out.connect(compressor).connect(this.ctx.destination);
+      // A bright, quickly fading tone: strong low harmonics, weaker high ones.
+      const partials = [0, 1, 0.55, 0.32, 0.22, 0.13, 0.09, 0.05, 0.035, 0.02];
+      this.wave = this.ctx.createPeriodicWave(new Float32Array(partials.length), new Float32Array(partials));
+    }
+    if (this.ctx.state === "suspended") this.ctx.resume();
+    return true;
+  },
+
+  /** (Re)start from where the song is now. */
+  start() {
+    this.stop();
+    if (!pianoHeard() || isPaused() || !this.ready()) return;
+    this.notes = pianoNotes();
+    const now = songTime();
+    this.next = lastAtOrBefore(this.notes.map((n) => n.time), now - 0.001) + 1;
+    this.anchor = null;
+    this.timer = setInterval(() => this.pump(), 30);
+    this.pump();
+  },
+
+  /** The notes changed (an edit, another view, a transposition): carry on with the new ones. */
+  reload() {
+    if (this.timer) this.start();
+  },
+
+  pump() {
+    if (isPaused()) return this.stop();
+    const now = songTime();
+    const rate = hasRecording() ? audio.playbackRate || 1 : 1;
+    const expected = this.anchor ? this.anchor.song + (this.ctx.currentTime - this.anchor.ctx) * rate : null;
+    // Follow the recording's clock, but only re-align when it has really drifted,
+    // since it is read in coarse steps.
+    if (expected === null || Math.abs(expected - now) > 0.06 || this.anchor.rate !== rate) {
+      this.anchor = { ctx: this.ctx.currentTime, song: now, rate };
+    }
+    const ahead = now + 0.3;
+    while (this.next < this.notes.length && this.notes[this.next].time < ahead) {
+      const note = this.notes[this.next++];
+      if (note.time < now - 0.05) continue; // already past
+      const when = this.anchor.ctx + (note.time - this.anchor.song) / rate;
+      this.strike(note.pitch, Math.max(when, this.ctx.currentTime), note.length / rate, note.level);
+    }
+  },
+
+  strike(pitch, when, length, level) {
+    if (pitch < 21 || pitch > 108) return;
+    const ctx = this.ctx;
+    const frequency = 440 * 2 ** ((pitch - 69) / 12);
+    const osc = ctx.createOscillator();
+    osc.setPeriodicWave(this.wave);
+    osc.frequency.value = frequency;
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(Math.min(frequency * 10, 16000), when);
+    filter.frequency.setTargetAtTime(Math.max(frequency * 2.5, 400), when, 0.35);
+    const gain = ctx.createGain();
+    const ring = 0.35 + 1.2 * Math.max(0, 96 - pitch) / 60; // low notes ring longer
+    const release = when + Math.max(length, 0.08);
+    gain.gain.setValueAtTime(0, when);
+    gain.gain.linearRampToValueAtTime(0.32 * level, when + 0.004);
+    gain.gain.setTargetAtTime(0, when + 0.004, ring);
+    gain.gain.setTargetAtTime(0, release, 0.07);
+    osc.connect(filter).connect(gain).connect(this.out);
+    osc.start(when);
+    osc.stop(release + 0.5);
+    const voice = { osc, gain };
+    this.voices.add(voice);
+    osc.onended = () => this.voices.delete(voice);
+  },
+
+  stop() {
+    clearInterval(this.timer);
+    this.timer = 0;
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (const { osc, gain } of this.voices) {
+      if (gain.gain.cancelAndHoldAtTime) gain.gain.cancelAndHoldAtTime(t);
+      else gain.gain.cancelScheduledValues(t);
+      gain.gain.setTargetAtTime(0, t, 0.02);
+      try { osc.stop(t + 0.15); } catch { /* not started yet */ }
+    }
+    this.voices.clear();
+  },
+};
 
 function sync(at) {
   const view = state.view;
   if (!view) return;
-  const time = typeof at === "number" ? at : audio.currentTime || 0;
+  const time = typeof at === "number" ? at : songTime();
   if (document.activeElement !== $("seek")) $("seek").value = time;
   $("clock").textContent = `${clock(time)} / ${clock(parseFloat($("seek").max))}`;
 
@@ -875,7 +1098,7 @@ function sync(at) {
     const bar = state.barEls[Math.floor(beat / perBar)];
     if (bar) {
       bar.classList.add("active");
-      if (!audio.paused && !$("view-chords").hidden && !state.editing) bar.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      if (!isPaused() && !$("view-chords").hidden && !state.editing) bar.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
     state.lastBeat = beat;
   }
@@ -946,6 +1169,7 @@ let refreshTimer = 0;
 /** Ask the server how the current document reads, and redraw. Returns false if the document was refused. */
 async function refresh() {
   clearTimeout(refreshTimer);
+  piano.reload();
   const seq = ++refreshSeq;
   const wantSheet = !$("view-sheet").hidden;
   if (wantSheet) $("sheet-status").textContent = "Updating…";

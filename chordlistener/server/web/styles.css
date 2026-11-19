@@ -173,7 +173,7 @@ h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.08; letter-spacing: -0.03
 .seek { grid-area: seek; display: flex; align-items: center; gap: 12px; }
 .seek input { flex: 1; accent-color: var(--accent); min-width: 0; }
 .seek span { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.player.silent .seek, .player.silent .play { display: none; }
+.sound { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); max-width: 46vw; }
 .hide-chords .now, .hide-chords .keys { visibility: hidden; }
 
 /* ---- Toolbar: what to show, edit, download ---- */

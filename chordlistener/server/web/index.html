@@ -138,6 +138,11 @@
         <div class="seek">
           <input id="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Position">
           <span id="clock">0:00 / 0:00</span>
+          <select id="sound" class="sound" aria-label="What you hear" title="Hear the recording, a piano playing the sheet music, or both">
+            <option value="recording">Recording</option>
+            <option value="piano">Piano plays the sheet music</option>
+            <option value="both">Recording + piano</option>
+          </select>
         </div>
         <audio id="audio" preload="auto"></audio>
       </div>
